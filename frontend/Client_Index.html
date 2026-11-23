@@ -1,0 +1,33 @@
+﻿<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <base target="_top">
+  <title>ROSE SEFID BEAUTY CLINIC</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0B3D3A">
+  <meta name="description" content="سامانه مدیریت کلینیک رز سفید">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230B3D3A'/%3E%3Cpath d='M16 6c-4.2 4.2-6.4 8.4-6.4 11.4a6.4 6.4 0 0 0 12.8 0C22.4 14.4 20.2 10.2 16 6z' fill='none' stroke='%23C9A227' stroke-width='1.8'/%3E%3Cpath d='M16 24.5v4' stroke='%23C9A227' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700;800&display=swap">
+  <?!= include('Client_Styles'); ?>
+</head>
+<body>
+  <div id="app">
+    <div class="splash" id="splash">
+      <div class="splash-inner">
+        <div class="splash-logo"><?!= include('Client_LogoMark'); ?></div>
+        <h1>ROSE SEFID BEAUTY CLINIC</h1>
+        <p>در حال بارگذاری...</p>
+      </div>
+    </div>
+  </div>
+  <script>
+    var WRC_LOGO_HTML = <?!= JSON.stringify(include('Client_Logo')) ?>;
+    var WRC_LOGO_MARK_HTML = <?!= JSON.stringify(include('Client_LogoMark')) ?>;
+  </script>
+  <?!= include('Client_App'); ?>
+</body>
+</html>

@@ -1,0 +1,49 @@
+# --- Python / venv -----------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- ابزارها -----------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- اسرار و محیط -------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!.gitkeep
+
+# --- دادهٔ محلی ---------------------------------------------------------------
+var/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.dpapi
+logs/
+*.log
+
+# --- ادیتور / سیستم -----------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+Thumbs.db
+desktop.ini
+
+# --- بسته‌بندی Desktop (فاز بعد) ----------------------------------------------
+desktop/dist/
+desktop/node_modules/

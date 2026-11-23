@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "white-rose-clinic"
+version = "0.5.0"
+description = "White Rose Clinic — clinic management engine (FastAPI + SQLAlchemy 2.x + Alembic)"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Proprietary" }
+authors = [{ name = "FoBa" }]
+dependencies = [
+  "fastapi==0.165.0",
+  "uvicorn[standard]==0.54.0",
+  "sqlalchemy==2.1.9",
+  "alembic==1.20.1",
+  "pydantic==2.14.4",
+  "pydantic-settings==2.16.3",
+  "python-dotenv==1.2.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "httpx>=0.28",
+]
+security = [
+  "argon2-cffi>=23.1",
+]
+postgres = [
+  "psycopg[binary]>=3.2",
+]
+desktop = [
+  "sqlcipher3-wheels>=0.5.7",
+]
+
+[tool.setuptools]
+package-dir = { "" = "backend" }
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:app.*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+src = ["backend"]

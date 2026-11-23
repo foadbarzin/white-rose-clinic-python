@@ -1,0 +1,1845 @@
+﻿<script>
+(function(){
+  var state = {
+    token: sessionStorage.getItem('wrc_token') || '',
+    user: null,
+    route: 'dashboard',
+    cache: {},
+    loading: false,
+    calendar: null,
+    invFilter: null,
+    reportRange: null,
+    reportTab: 'summary'
+  };
+
+  function $(sel, root){ return (root||document).querySelector(sel); }
+  function $all(sel, root){ return Array.prototype.slice.call((root||document).querySelectorAll(sel)); }
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function fmtMoney(n){ n = Number(n||0); if(isNaN(n)) n=0; return n.toLocaleString('fa-IR') + ' تومان'; }
+  function fmtNum(n){ n=Number(n||0); if(isNaN(n)) n=0; return n.toLocaleString('fa-IR'); }
+
+  /* Calendar info comes from the server (Asia/Tehran + Jalali month + Saturday week)
+     so the UI never guesses the clinic timezone. */
+  function ensureCalendar(){
+    if (state.calendar) return Promise.resolve(state.calendar);
+    return api('system.calendar', {}).then(function(c){
+      state.calendar = c || {};
+      return state.calendar;
+    }).catch(function(){
+      var t = todayIso();
+      state.calendar = { today: t, week_start: t, month_start: monthStart(t), month_end: t, jalali_label: '', week_label: 'شنبه‌محور', month_label: '' };
+      return state.calendar;
+    });
+  }
+  function invoiceStatusLabel(s){
+    var map = {
+      draft:'پیش‌نویس', pending_discount_approval:'در انتظار تأیید تخفیف', issued:'صادرشده',
+      partially_paid:'پرداخت ناقص', paid:'پرداخت‌شده', void:'باطل‌شده',
+      calculated:'محاسبه‌شده', payable:'قابل پرداخت', adjusted:'تعدیل‌شده',
+      requested:'درخواست‌شده', approved:'تأییدشده', rejected:'ردشده', none:'—'
+    };
+    return map[s] || s || '-';
+  }
+  function badge(text, type){ return '<span class="badge '+(type||'')+'">'+esc(text)+'</span>'; }
+  function todayIso(){ var d=new Date(); var y=d.getFullYear(),m=('0'+(d.getMonth()+1)).slice(-2),da=('0'+d.getDate()).slice(-2); return y+'-'+m+'-'+da; }
+  // Jalali (Shamsi) date label for UI display; falls back to ISO when Intl is unavailable.
+  function todayLabel(){
+    try { return new Date().toLocaleDateString('fa-IR', { year:'numeric', month:'long', day:'numeric' }); }
+    catch(e){ return todayIso(); }
+  }
+  function initial(u){ var s = (u && (u.display_name || u.username)) || '?'; return String(s).trim().charAt(0); }
+
+  /* ---- dashboard period helpers (daily / weekly / monthly + custom range) ---- */
+  function isoAddDays(iso, days){
+    var d = new Date(String(iso) + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + Number(days || 0));
+    return d.toISOString().substring(0, 10);
+  }
+  function monthStart(iso){ return String(iso).substring(0, 8) + '01'; }
+  function dashRange(){
+    if (!state.range) {
+      var to = todayIso();
+      state.range = { from: monthStart(to), to: to, granularity: 'day', preset: 'month' };
+    }
+    return state.range;
+  }
+  function applyDashPreset(id){
+    var to = todayIso(), from = to;
+    if (id === '7d') from = isoAddDays(to, -6);
+    else if (id === '30d') from = isoAddDays(to, -29);
+    else if (id === 'month') from = monthStart(to);
+    var cur = dashRange();
+    state.range = { from: from, to: to, granularity: cur.granularity || 'day', preset: id };
+    loadRoute('dashboard');
+  }
+  function faDate(iso){
+    try { return new Date(String(iso) + 'T00:00:00').toLocaleDateString('fa-IR', { year:'numeric', month:'2-digit', day:'2-digit' }); }
+    catch(e){ return String(iso || ''); }
+  }
+  function compactMoney(n){
+    n = Number(n || 0);
+    var neg = n < 0; n = Math.abs(n);
+    function f(x){ return Number(Math.round(x * 10) / 10).toLocaleString('fa-IR'); }
+    var s;
+    if (n >= 1e9) s = f(n / 1e9) + ' میلیارد';
+    else if (n >= 1e6) s = f(n / 1e6) + ' میلیون';
+    else if (n >= 1e3) s = f(n / 1e3) + ' هزار';
+    else s = fmtNum(n);
+    return (neg ? '−' : '') + s;
+  }
+  function bucketLabelFa(key, gran){
+    try {
+      if (gran === 'month') {
+        return new Date(String(key) + '-01T00:00:00').toLocaleDateString('fa-IR', { year:'numeric', month:'2-digit' });
+      }
+      return new Date(String(key) + 'T00:00:00').toLocaleDateString('fa-IR', { month:'2-digit', day:'2-digit' });
+    } catch(e){ return String(key || ''); }
+  }
+  /* ---- version chip ---- */
+  function applyVersion(v){
+    if (v) state.appVersion = String(v);
+    if (!state.appVersion) return;
+    var label = 'v' + state.appVersion;
+    $all('.js-app-version').forEach(function(el){ el.textContent = label; });
+    try { document.title = 'ROSE SEFID BEAUTY CLINIC · ' + label; } catch(e){}
+  }
+  /* ---- smart insights ---- */
+  function deltaChip(label, pct, goodWhenUp){
+    if (pct === undefined) return '';
+    var v = (pct === null) ? null : Number(pct);
+    var cls = 'flat', arrow = '•', txt = '—';
+    if (v === null) { txt = 'جدید'; }
+    else {
+      txt = Math.abs(v).toLocaleString('fa-IR') + '٪';
+      if (v > 0) { arrow = '▲'; cls = goodWhenUp ? 'good' : 'bad'; }
+      else if (v < 0) { arrow = '▼'; cls = goodWhenUp ? 'bad' : 'good'; }
+    }
+    return '<span class="delta ' + cls + '">' + esc(label) + ' <span class="arrow">' + arrow + '</span> ' + txt + '</span>';
+  }
+  function insightsHtml(ins){
+    if (!ins) return '';
+    var alerts = (ins.alerts || []).map(function(a){
+      var amount = Number(a.amount || 0);
+      return '<li class="insight ' + esc(a.level || 'info') + '">' + esc(a.text) + (amount ? ' <b>' + fmtMoney(amount) + '</b>' : '') + '</li>';
+    }).join('');
+    var tops = (ins.top_services || []).map(function(s){
+      return '<li class="insight top">' + esc(s.name) + ' <span class="muted small">(' + fmtNum(s.quantity) + ' مورد)</span> <b>' + fmtMoney(s.amount) + '</b></li>';
+    }).join('');
+    return '<div class="insights">' +
+      '<div class="insights-head">' +
+        '<span class="insights-title">تحلیل هوشمند</span>' +
+        '<span class="insights-deltas">' +
+          deltaChip('درآمد', ins.deltas && ins.deltas.income, true) +
+          deltaChip('هزینه', ins.deltas && ins.deltas.expense, false) +
+          deltaChip('خالص', ins.deltas && ins.deltas.net, true) +
+        '</span>' +
+      '</div>' +
+      '<ul class="insight-list">' + alerts + '</ul>' +
+      (tops ? '<div class="insight-block"><div class="insight-block-title">پرفروش‌ترین خدمات بازه</div><ul class="insight-list">' + tops + '</ul></div>' : '') +
+      (ins.best_day ? '<div class="insight-note">بهترین روز بازه: <b>' + esc(ins.best_day.label) + '</b> با ' + fmtMoney(ins.best_day.income) + ' درآمد</div>' : '') +
+      '<div class="insight-note muted small">مقایسه با بازه قبل: ' + esc(faDate(ins.previous_from || '')) + ' تا ' + esc(faDate(ins.previous_to || '')) + '</div>' +
+    '</div>';
+  }
+  /* Lightweight inline SVG chart (no external libraries - works inside Apps Script). */
+  function chartSvg(d){
+    var buckets = (d && d.buckets) || [];
+    var gran = (d && d.granularity) || 'day';
+    if (!buckets.length) return '<div class="chart-empty">داده‌ای برای این بازه وجود ندارد.</div>';
+    var hasData = false;
+    buckets.forEach(function(b){ if (Number(b.income || 0) || Number(b.expense || 0)) hasData = true; });
+    if (!hasData) return '<div class="chart-empty">در این بازه تراکنشی ثبت نشده است.</div>';
+
+    var W = 920, H = 320, pl = 72, pr = 18, pt = 16, pb = 46;
+    var iw = W - pl - pr, ih = H - pt - pb, base = pt + ih;
+    var max = 0;
+    buckets.forEach(function(b){ max = Math.max(max, Number(b.income || 0), Number(b.expense || 0)); });
+    if (max <= 0) max = 1;
+    var mag = Math.pow(10, Math.floor(Math.log(max) / Math.LN10));
+    var step = mag / 2;
+    max = Math.ceil(max / step) * step;
+
+    var n = buckets.length, slot = iw / n;
+    var bw = Math.max(2.5, Math.min(26, slot * 0.33));
+    function yv(v){ return pt + ih - (ih * (Math.max(0, Number(v || 0)) / max)); }
+
+    var parts = [];
+    for (var gi = 0; gi <= 4; gi++) {
+      var val = max * gi / 4, yy = yv(val);
+      parts.push('<line class="chart-grid" x1="' + pl + '" y1="' + yy.toFixed(1) + '" x2="' + (W - pr) + '" y2="' + yy.toFixed(1) + '"/>');
+      parts.push('<text class="chart-axis" x="' + (pl - 10) + '" y="' + (yy + 4).toFixed(1) + '" text-anchor="end">' + esc(compactMoney(val)) + '</text>');
+    }
+
+    var bars = [], netPts = [];
+    var every = Math.max(1, Math.ceil(n / 14));
+    buckets.forEach(function(b, i){
+      var cx = pl + slot * i + slot / 2;
+      var inc = Number(b.income || 0), exp = Number(b.expense || 0);
+      var yi = yv(inc), hi = base - yi;
+      var ye = yv(exp), he = base - ye;
+      var xi = cx - bw - 1.5, xe = cx + 1.5;
+      var lbl = bucketLabelFa(b.key, gran);
+      var tip = lbl + ' — درآمد: ' + fmtMoney(inc) + ' | هزینه: ' + fmtMoney(exp) + ' | خالص: ' + fmtMoney(b.net);
+      bars.push('<g><title>' + esc(tip) + '</title>');
+      if (hi >= 0.5) bars.push('<rect class="chart-bar income" x="' + xi.toFixed(1) + '" y="' + yi.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + hi.toFixed(1) + '" rx="2.5"/>');
+      if (he >= 0.5) bars.push('<rect class="chart-bar expense" x="' + xe.toFixed(1) + '" y="' + ye.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + he.toFixed(1) + '" rx="2.5"/>');
+      bars.push('</g>');
+      netPts.push(cx.toFixed(1) + ',' + yv(b.net).toFixed(1));
+      if (i % every === 0) {
+        bars.push('<text class="chart-axis x" x="' + cx.toFixed(1) + '" y="' + (base + 24) + '" text-anchor="middle">' + esc(lbl) + '</text>');
+      }
+    });
+
+    return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="نمودار درآمد و هزینه">' +
+      '<defs>' +
+        '<linearGradient id="chartGold" x1="0" y1="0" x2="0" y2="1">' +
+          '<stop offset="0%" stop-color="#F0D97A"/>' +
+          '<stop offset="100%" stop-color="#C9A227"/>' +
+        '</linearGradient>' +
+      '</defs>' +
+      parts.join('') +
+      '<line class="chart-base" x1="' + pl + '" y1="' + base + '" x2="' + (W - pr) + '" y2="' + base + '"/>' +
+      bars.join('') +
+      (netPts.length > 1 ? '<polyline class="chart-net" points="' + netPts.join(' ') + '"/>' : '') +
+      '</svg>';
+  }
+
+  function logoHtml(){
+    return (typeof WRC_LOGO_HTML === 'string') ? WRC_LOGO_HTML : '';
+  }
+  function logoMarkHtml(){
+    return (typeof WRC_LOGO_MARK_HTML === 'string') ? WRC_LOGO_MARK_HTML : logoHtml();
+  }
+
+  function api(action, payload){
+    return new Promise(function(resolve, reject){
+      google.script.run
+        .withSuccessHandler(function(res){
+          if(res && res.ok) resolve(res.data);
+          else reject(res && res.error ? res.error : {message:'خطای نامشخص'});
+        })
+        .withFailureHandler(function(err){
+          reject({code:'CLIENT', message: (err && err.message) ? err.message : 'خطا در ارتباط با سرور'});
+        })
+        .apiCall(action, payload || {}, state.token || '');
+    });
+  }
+
+  function setToken(t){ state.token = t||''; if(t) sessionStorage.setItem('wrc_token', t); else sessionStorage.removeItem('wrc_token'); }
+
+  function toast(msg, type){
+    var el = $('#toast');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'toast';
+      el.setAttribute('role','status');
+      el.setAttribute('aria-live','polite');
+      document.body.appendChild(el);
+    }
+    var item = document.createElement('div');
+    item.className = 'alert ' + (type||'info');
+    item.textContent = msg;
+    el.appendChild(item);
+    setTimeout(function(){
+      try{ item.classList.add('hide'); }catch(e){}
+      setTimeout(function(){ try{ el.removeChild(item); }catch(e){} }, 220);
+    }, 3400);
+  }
+
+  /* Flat, single-level navigation: every top item shares the same weight,
+     spacing and icon size; sub-items are indented under their parent. */
+  var routes = [
+    {id:'dashboard', title:'داشبورد', icon:'dashboard', roles:['admin','operator','doctor']},
+    {id:'invoices', title:'ثبت فاکتور', icon:'invoice', roles:['admin','operator','doctor']},
+    {id:'operations', title:'مدیریت عملیات', icon:'operations', roles:['admin','operator','doctor'], children:[
+      {id:'customers', title:'مشتریان', roles:['admin','operator','doctor']},
+      {id:'commissions', title:'پورسانت‌ها', roles:['admin']},
+      {id:'expenses', title:'هزینه‌ها', roles:['admin','operator']}
+    ]},
+    {id:'reports', title:'گزارش‌ها', icon:'reports', roles:['admin']},
+    {id:'definitions', title:'تعاریف پایه', icon:'definitions', roles:['admin'], children:[
+      {id:'doctors', title:'تعریف پزشک', roles:['admin']},
+      {id:'operators', title:'تعریف اپراتور', roles:['admin']},
+      {id:'services', title:'تعریف خدمات', roles:['admin']},
+      {id:'commissionRules', title:'تعریف پورسانت', roles:['admin']}
+    ]},
+    {id:'revenue', title:'درآمدهای متفرقه', icon:'revenue', roles:['admin']},
+    {id:'users', title:'کاربران', icon:'users', roles:['admin']},
+    {id:'settings', title:'تنظیمات', icon:'settings', roles:['admin']}
+  ];
+
+  var NAV_ICONS = {
+    dashboard: '<path d="M3 3h7v7H3zM14 3h7v4h-7zM14 10h7v11h-7zM3 13h7v8H3z"/>',
+    invoice: '<path d="M6 2h9l4 4v16l-3-2-3 2-3-2-3 2V4a2 2 0 0 1 2-2z"/><path d="M9 8h7M9 12h7M9 16h4"/>',
+    operations: '<path d="M4 7h16M4 12h16M4 17h10"/><circle cx="19" cy="17" r="2.4"/>',
+    reports: '<path d="M3 21h18"/><path d="M6 21V11M11 21V5M16 21v-7M21 21V9"/>',
+    definitions: '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h9M17 18h3"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="18" r="2"/>',
+    revenue: '<path d="M3 7h18v12H3z"/><path d="M3 7l9-4 9 4"/><circle cx="12" cy="13" r="2.2"/>',
+    users: '<circle cx="9" cy="8" r="3.2"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 5.5a3 3 0 0 1 0 5.6M17.5 20a6 6 0 0 0-2.2-4.6"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>'
+  };
+  function navIcon(name){
+    var body = NAV_ICONS[name] || '<circle cx="12" cy="12" r="8"/>';
+    return '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">'+body+'</svg>';
+  }
+
+  function routeMeta(routeId){
+    for (var i = 0; i < routes.length; i++) {
+      var r = routes[i];
+      if (r.children && r.children.length) {
+        for (var j = 0; j < r.children.length; j++) {
+          if (r.children[j].id === routeId) return r.children[j];
+        }
+      } else if (r.id === routeId) {
+        return r;
+      }
+    }
+    return null;
+  }
+  function allowed(routeId){
+    var r = routeMeta(routeId);
+    if(!r || !state.user) return false;
+    return r.roles.indexOf(state.user.role) >= 0;
+  }
+  function render(){
+    var app = $('#app');
+    if(!state.token || !state.user){ renderLogin(app); applyVersion(); return; }
+    renderShell(app);
+    applyVersion();
+  }
+
+  function renderLogin(app){
+    app.innerHTML =
+      '<div class="login-wrap"><div class="login-card">'+
+      '<div class="login-watermark" aria-hidden="true">'+logoMarkHtml()+'</div>'+
+      '<div class="login-brand"><div class="logo lockup">'+logoHtml()+'</div><p>سامانه مدیریت کلینیک رز سفید</p></div>'+
+      '<div id="loginAlert"></div>'+
+      '<div class="form-group"><label>نام کاربری</label><input id="loginUser" autocomplete="username"></div>'+
+      '<div class="form-group"><label>رمز عبور</label><input id="loginPass" type="password" autocomplete="current-password"></div>'+
+      '<div class="row"><button class="btn gold block" id="loginBtn">ورود به سامانه</button></div>'+
+      '<details class="setup-details"><summary>راه‌اندازی اولیه (فقط در صورت نبود مدیر فعال)</summary>'+
+      '<div class="form-group"><label>نام کاربری مدیر</label><input id="bootUser" autocomplete="off"></div>'+
+      '<div class="form-group"><label>رمز عبور مدیر</label><input id="bootPass" type="password" autocomplete="new-password"></div>'+
+      '<div class="form-group"><label>نام نمایشی</label><input id="bootName" value="مدیر سیستم"></div>'+
+      '<button class="btn secondary sm block" id="bootBtn">ایجاد مدیر اولیه</button>'+
+      '</details>'+
+      '<div class="login-hint"><span>ورود با نام کاربری و رمز عبور</span><span class="js-app-version">—</span></div>'+
+      '</div></div>';
+    $('#loginBtn').onclick = doLogin;
+    $('#bootBtn').onclick = doBootstrap;
+    $('#loginPass').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ doLogin(); } });
+    $('#loginUser').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ $('#loginPass').focus(); } });
+  }
+
+  function renderShell(app){
+    var navHtml = '';
+    routes.forEach(function(r){
+      var kids = (r.children || []).filter(function(c){ return allowed(c.id); });
+      var childActive = kids.some(function(c){ return c.id === state.route; });
+      if (kids.length) {
+        navHtml += '<div class="nav-group' + (childActive ? ' open' : '') + '">' +
+          '<button type="button" class="nav-item nav-parent' + (childActive ? ' is-open' : '') + '" aria-expanded="' + (childActive ? 'true' : 'false') + '">' +
+            '<span class="nav-ico">' + navIcon(r.icon) + '</span>' +
+            '<span class="nav-label">' + esc(r.title) + '</span>' +
+            '<span class="chev" aria-hidden="true">▾</span>' +
+          '</button>' +
+          '<div class="nav-sub">' +
+            kids.map(function(c){
+              var on = state.route === c.id;
+              return '<button type="button" data-route="' + c.id + '" class="nav-item nav-child' + (on ? ' active' : '') + '"' + (on ? ' aria-current="page"' : '') + '>' +
+                '<span class="nav-dot" aria-hidden="true"></span>' +
+                '<span class="nav-label">' + esc(c.title) + '</span>' +
+              '</button>';
+            }).join('') +
+          '</div>' +
+        '</div>';
+      } else if (allowed(r.id)) {
+        navHtml += '<button type="button" data-route="' + r.id + '" class="nav-item' + (state.route === r.id ? ' active' : '') + '"' + (state.route === r.id ? ' aria-current="page"' : '') + '>' +
+          '<span class="nav-ico">' + navIcon(r.icon) + '</span>' +
+          '<span class="nav-label">' + esc(r.title) + '</span>' +
+        '</button>';
+      }
+    });
+    app.innerHTML =
+      '<div class="app-shell">'+
+        '<aside class="sidebar">'+
+          '<div class="brand"><div class="logo">'+logoMarkHtml()+'</div><div><div class="title">ROSE SEFID</div><div class="subtitle">BEAUTY CLINIC</div></div></div>'+
+          '<nav class="nav">'+navHtml+'</nav>'+
+          '<div class="sidebar-footer">'+
+            '<div class="user-chip"><span class="avatar">'+esc(initial(state.user))+'</span>'+
+              '<span class="user-meta"><span class="user-name">'+esc(state.user.display_name||state.user.username)+'</span>'+
+              '<span class="user-role">'+esc(roleLabel(state.user.role))+'</span></span></div>'+
+            '<button class="btn secondary sm block" id="logoutBtn">خروج</button>'+
+            '<div class="version-row"><span class="version-chip">نسخه <span class="js-app-version">—</span></span></div>'+
+          '</div>'+
+        '</aside>'+
+        '<main class="main">'+
+          '<div class="topbar">'+
+            '<div class="page-title-wrap"><span class="topbar-logo" aria-hidden="true">'+logoMarkHtml()+'</span>'+
+              '<div class="page-title" id="pageTitle"></div></div>'+
+            '<div class="user">'+
+              '<span class="badge version-badge" title="نسخه برنامه"><span class="js-app-version">—</span></span>'+
+              '<span class="badge today-chip" title="تاریخ امروز">'+esc(todayLabel())+'</span>'+
+              '<button type="button" class="btn secondary sm icon-btn" id="refreshBtn" title="به‌روزرسانی" aria-label="به‌روزرسانی">⟳</button>'+
+              '<span class="badge info">'+esc(roleLabel(state.user.role))+'</span>'+
+              '<span class="avatar">'+esc(initial(state.user))+'</span>'+
+              '<span>'+esc(state.user.username)+'</span>'+
+            '</div></div>'+
+          '<div class="content" id="content"><div class="panel">در حال بارگذاری...</div></div>'+
+        '</main>'+
+      '</div>';
+    $all('.nav-parent').forEach(function(b){
+      b.onclick = function(){
+        var g = b.parentNode;
+        var willOpen = !g.classList.contains('open');
+        // Only one submenu may stay open at a time.
+        $all('.nav-group').forEach(function(other){
+          if (other === g) return;
+          other.classList.remove('open');
+          var otherBtn = other.querySelector('.nav-parent');
+          if (otherBtn) { otherBtn.classList.remove('is-open'); otherBtn.setAttribute('aria-expanded', 'false'); }
+        });
+        g.classList.toggle('open', willOpen);
+        b.classList.toggle('is-open', willOpen);
+        b.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+      };
+    });
+    $all('.nav button[data-route]').forEach(function(b){ b.onclick = function(){ navigate(b.getAttribute('data-route')); }; });
+    var refreshBtn = $('#refreshBtn');
+    if (refreshBtn) refreshBtn.onclick = function(){ loadRoute(state.route); toast('به‌روزرسانی شد', 'success'); };
+    $('#logoutBtn').onclick = doLogout;
+    navigate(state.route || 'dashboard');
+  }
+
+  function roleLabel(r){ return r==='admin'?'مدیر':(r==='operator'?'اپراتور':(r==='doctor'?'پزشک':r)); }
+  function navigate(routeId){
+    if(!allowed(routeId)) routeId='dashboard';
+    state.route = routeId;
+    $all('.nav button[data-route]').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-route')===routeId); });
+    $all('.nav-group').forEach(function(g){
+      var inside = $all('button[data-route]', g).some(function(b){ return b.getAttribute('data-route')===routeId; });
+      if (inside) g.classList.add('open');
+      else g.classList.remove('open');
+      var parentBtn = g.querySelector('.nav-parent');
+      if (parentBtn) {
+        parentBtn.classList.toggle('is-open', inside);
+        parentBtn.setAttribute('aria-expanded', inside ? 'true' : 'false');
+      }
+    });
+    var r = routeMeta(routeId);
+    if($('#pageTitle')) $('#pageTitle').textContent = r ? r.title : '';
+    loadRoute(routeId);
+  }
+
+  function doLogin(){
+    var u=$('#loginUser').value.trim(), p=$('#loginPass').value;
+    var alert=$('#loginAlert'); alert.innerHTML='';
+    if(!u||!p){ alert.innerHTML='<div class="alert error">نام کاربری و رمز عبور الزامی است.</div>'; return; }
+    $('#loginBtn').disabled=true;
+    api('auth.login',{username:u,password:p,deviceInfo:navigator.userAgent||''}).then(function(data){
+      setToken(data.token); state.user = data.user;
+      if(data.mustChangePassword){ renderChangePassword(true); } else { render(); }
+    }).catch(function(err){ alert.innerHTML='<div class="alert error">'+esc(err.message||'خطا در ورود')+'</div>'; }).finally(function(){ var b=$('#loginBtn'); if(b) b.disabled=false; });
+  }
+
+  function doBootstrap(){
+    var u=$('#bootUser').value.trim(), p=$('#bootPass').value, n=$('#bootName').value.trim();
+    var alert=$('#loginAlert');
+    if(!u||!p){ alert.innerHTML='<div class="alert error">اطلاعات مدیر اولیه ناقص است.</div>'; return; }
+    $('#bootBtn').disabled=true;
+    api('setup.bootstrapAdmin',{username:u,password:p,displayName:n||'مدیر سیستم'}).then(function(){
+      alert.innerHTML='<div class="alert success">مدیر اولیه ایجاد شد. اکنون وارد شوید.</div>';
+    }).catch(function(err){ alert.innerHTML='<div class="alert error">'+esc(err.message||'خطا')+'</div>'; }).finally(function(){ var b=$('#bootBtn'); if(b) b.disabled=false; });
+  }
+
+  function renderChangePassword(forced){
+    var app=$('#app');
+    app.innerHTML='<div class="login-wrap"><div class="login-card"><div class="login-brand"><h1>تغییر رمز عبور</h1><p>'+ (forced?'تغییر رمز در اولین ورود الزامی است.':'') +'</p></div><div id="cpAlert"></div><div class="form-group"><label>رمز فعلی</label><input id="oldP" type="password"></div><div class="form-group"><label>رمز جدید</label><input id="newP" type="password"></div><button class="btn gold" id="cpBtn">ذخیره و ادامه</button></div></div>';
+    $('#cpBtn').onclick=function(){
+      api('auth.changePassword',{token:state.token,oldPassword:$('#oldP').value,newPassword:$('#newP').value}).then(function(){
+        $('#cpAlert').innerHTML='<div class="alert success">رمز عبور تغییر کرد. دوباره وارد شوید.</div>';
+        setToken(''); state.user=null; setTimeout(render, 800);
+      }).catch(function(err){ $('#cpAlert').innerHTML='<div class="alert error">'+esc(err.message||'خطا')+'</div>'; });
+    };
+  }
+
+  function doLogout(){
+    api('auth.logout',{token:state.token}).finally(function(){ setToken(''); state.user=null; render(); });
+  }
+  function loadRoute(routeId){
+    var c = $('#content'); if(!c) return;
+    c.innerHTML = '<div class="panel loading"><span class="spinner" aria-hidden="true"></span> در حال بارگذاری…</div>';
+    var fn = {
+      dashboard: viewDashboard, customers: viewCustomers, doctors: viewDoctors, operators: viewOperators,
+      services: viewServices, invoices: viewInvoices, expenses: viewExpenses, revenue: viewRevenue,
+      commissions: viewCommissions, commissionRules: viewCommissionRules, reports: viewReports,
+      users: viewUsers, settings: viewSettings
+    }[routeId];
+    if(!fn){ c.innerHTML='<div class="panel">صفحه یافت نشد.</div>'; return; }
+    Promise.resolve().then(fn).catch(function(err){ c.innerHTML='<div class="panel"><div class="alert error">'+esc(err.message||'خطا در بارگذاری')+'</div></div>'; if(err && err.code==='UNAUTHORIZED'){ setToken(''); state.user=null; render(); } });
+  }
+
+  function card(t,v,h,tone){ return '<div class="card'+(tone?' tone-'+tone:'')+'"><h3>'+esc(t)+'</h3><div class="value">'+esc(v)+'</div>'+ (h?'<div class="hint">'+esc(h)+'</div>':'') +'</div>'; }
+
+  function viewDashboard(){
+    var r0 = dashRange();
+    var isAdmin = state.user.role === 'admin';
+    var jobs = [ api('reports.dashboard', {}).catch(function(){ return {}; }) ];
+    if (isAdmin) {
+      jobs.push(api('reports.period', { from: r0.from, to: r0.to, granularity: r0.granularity }));
+      jobs.push(api('reports.insights', { from: r0.from, to: r0.to }).catch(function(){ return null; }));
+    }
+    return Promise.all(jobs).then(function(res){
+      var k = res[0] || {};
+      var d = isAdmin ? (res[1] || {}) : {};
+      var ins = isAdmin ? (res[2] || null) : null;
+      var t = d.totals || {};
+      var cards = '';
+      if (state.user.role === 'doctor') {
+        cards += card('فاکتورهای این ماه', fmtNum(k.month_invoices), '', 'info');
+        cards += card('مبلغ فاکتورهای ماه', fmtMoney(k.month_total), '', 'gold');
+        cards += card('پورسانت قابل پرداخت', fmtMoney(k.commission_payable), '', 'warn');
+        cards += card('پورسانت پرداخت‌شده', fmtMoney(k.commission_paid), '', 'success');
+      } else if (!isAdmin) {
+        // Operators get operational figures only — profit data is admin-only.
+        cards += card('فاکتورهای این ماه', fmtNum(k.month_invoices_count), '', 'info');
+        cards += card('مبلغ فاکتورهای ماه', fmtMoney(k.month_invoice_total), '', 'gold');
+        cards += card('مشتریان', fmtNum(k.customers_count), '', 'muted');
+        cards += card('امروز', esc(k.today || todayIso()), 'تاریخ کاری', 'info');
+      } else {
+        cards += card('درآمد بازه', fmtMoney(t.income), 'فاکتور ' + fmtMoney(t.income_payments) + ' + متفرقه ' + fmtMoney(t.income_misc), 'gold');
+        cards += card('هزینه بازه', fmtMoney(t.expense), '', 'danger');
+        cards += card('خالص بازه', fmtMoney(t.net), Number(t.net) < 0 ? 'زیان در این بازه' : 'سود در این بازه', Number(t.net) < 0 ? 'danger' : 'success');
+        cards += card('فاکتورهای بازه', fmtNum(t.invoices_count), fmtMoney(t.invoices_total), 'info');
+        cards += card('پورسانت قابل پرداخت', fmtMoney(k.commission_payable_total !== undefined ? k.commission_payable_total : t.commission_payable), '', 'warn');
+        cards += card('مشتریان', fmtNum(k.customers_count), '', 'muted');
+      }
+      var preset = r0.preset || '';
+      function seg(id, label){ return '<button class="seg-btn' + (preset === id ? ' active' : '') + '" data-preset="' + id + '">' + label + '</button>'; }
+      var quick = '';
+      [['customers','مشتریان'],['invoices','ثبت فاکتور'],['services','تعریف خدمات'],['commissions','پورسانت‌ها'],['reports','گزارش‌ها']].forEach(function(x){
+        if (allowed(x[0])) quick += '<button class="btn secondary sm" data-go="'+x[0]+'">'+esc(x[1])+'</button>';
+      });
+      /* __DASH_PART2__ */
+      $('#content').innerHTML =
+        '<div class="panel">'+
+          '<div class="panel-header"><h2>'+(isAdmin ? 'گزارش بازه' : 'خلاصه عملیاتی')+'</h2>'+
+            '<div class="range-bar"'+(isAdmin ? '' : ' hidden')+'>'+
+              '<div class="segmented">'+seg('today','امروز')+seg('7d','۷ روز')+seg('30d','۳۰ روز')+seg('month','این ماه')+'</div>'+
+              '<select id="dashGran" class="input-sm" aria-label="دقت گزارش">'+
+                '<option value="day"'+((d.granularity||'day')==='day'?' selected':'')+'>روزانه</option>'+
+                '<option value="week"'+(d.granularity==='week'?' selected':'')+'>هفتگی</option>'+
+                '<option value="month"'+(d.granularity==='month'?' selected':'')+'>ماهانه</option>'+
+              '</select>'+
+              '<input type="date" id="dashFrom" class="input-sm" value="'+esc(d.from||r0.from)+'" aria-label="از تاریخ">'+
+              '<span class="muted small">تا</span>'+
+              '<input type="date" id="dashTo" class="input-sm" value="'+esc(d.to||r0.to)+'" aria-label="تا تاریخ">'+
+              '<button class="btn gold sm" id="dashApply">اعمال</button>'+
+            '</div>'+
+          '</div>'+
+          '<div class="grid cards">'+cards+'</div>'+
+          (isAdmin ? '<div class="chart-card">'+
+            '<div class="chart-head">'+
+              '<div class="chart-title">درآمد، هزینه و خالص</div>'+
+              '<div class="chart-legend">'+
+                '<span><i class="dot income"></i>درآمد</span>'+
+                '<span><i class="dot expense"></i>هزینه</span>'+
+                '<span><i class="dot net"></i>خالص</span>'+
+                '<span class="muted small">'+esc(d.granularity_label||'')+' • '+esc(faDate(d.from||r0.from))+' تا '+esc(faDate(d.to||r0.to))+'</span>'+
+              '</div>'+
+            '</div>'+
+            chartSvg(d)+
+          '</div>' : '')+
+          (ins ? insightsHtml(ins) : '')+
+        '</div>'+
+        '<div class="panel"><div class="panel-header"><h2>خلاصه وضعیت</h2>'+
+          '<div class="row">'+
+            '<span class="badge">امروز: '+esc(todayLabel())+'</span>'+
+            '<span class="badge info">نقش: '+esc(roleLabel(state.user.role))+'</span>'+
+          '</div></div>'+
+          '<div class="alert info">برای شروع، ابتدا ساختار شیت‌ها (Setup) را اجرا کنید، شناسه شیت و <b>AUTH_PEPPER</b> را در Script Properties تنظیم کنید و در صورت نیاز مدیر اولیه را ایجاد کنید. هیچ داده نمونه‌ای ایجاد نمی‌شود.</div>'+
+        '</div>'+
+        (quick ? '<div class="panel"><div class="panel-header"><h2>دسترسی سریع</h2></div><div class="row">'+quick+'</div></div>' : '');
+
+      $all('.seg-btn[data-preset]').forEach(function(b){ b.onclick = function(){ applyDashPreset(b.getAttribute('data-preset')); }; });
+      $all('[data-go]').forEach(function(b){ b.onclick = function(){ navigate(b.getAttribute('data-go')); }; });
+      var applyBtn = $('#dashApply');
+      if (applyBtn) applyBtn.onclick = function(){
+        var from = $('#dashFrom').value, to = $('#dashTo').value, gran = $('#dashGran').value;
+        if (!from || !to) { toast('بازه تاریخ را کامل کنید', 'error'); return; }
+        if (from > to) { var tmp = from; from = to; to = tmp; }
+        state.range = { from: from, to: to, granularity: gran, preset: '' };
+        loadRoute('dashboard');
+      };
+      var granSel = $('#dashGran');
+      if (granSel) granSel.onchange = function(){
+        var cur = dashRange();
+        state.range = { from: cur.from, to: cur.to, granularity: this.value, preset: cur.preset || '' };
+        loadRoute('dashboard');
+      };
+    });
+  }
+
+  function viewCustomers(){
+    return api('customers.list',{}).then(function(rows){
+      var canEdit = state.user.role!=='doctor';
+      rows = rows || [];
+      function statusFa(s){ var v = String(s||'active'); return v==='active' ? 'فعال' : (v==='inactive' ? 'غیرفعال' : v); }
+      function rowHtml(r){
+        return '<tr><td>'+esc(r.full_name)+'</td><td class="ltr-num">'+esc(r.mobile)+'</td><td>'+esc(r.national_code)+'</td><td>'+esc(statusFa(r.status))+'</td>'+
+          (canEdit?'<td><button class="btn sm secondary" data-edit="'+esc(r.id)+'">ویرایش</button></td>':'')+'</tr>';
+      }
+      function bindRows(){
+        if(!canEdit) return;
+        $all('[data-edit]').forEach(function(b){
+          b.onclick = function(){
+            var id = b.getAttribute('data-edit');
+            openCustomerModal(rows.filter(function(x){ return x.id === id; })[0]);
+          };
+        });
+      }
+      function paint(q){
+        var list = rows.filter(function(r){
+          if(!q) return true;
+          return [r.full_name, r.mobile, r.phone, r.national_code].some(function(v){ return String(v==null?'':v).toLowerCase().indexOf(q) >= 0; });
+        });
+        $('#custBody').innerHTML = list.map(rowHtml).join('');
+        $('#custCount').textContent = fmtNum(list.length) + ' از ' + fmtNum(rows.length);
+        bindRows();
+      }
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>مشتریان</h2>'+
+        '<div class="toolbar">'+
+          '<input id="custSearch" class="input-sm search-input" type="search" placeholder="جستجو…" aria-label="جستجو در مشتریان">'+
+          '<span class="chip-count" id="custCount"></span>'+
+          (canEdit?'<button class="btn gold sm" id="addCustomer">مشتری جدید</button>':'')+
+        '</div></div>'+
+        '<div class="table-wrap"><table><thead><tr><th>نام</th><th>موبایل</th><th>کد ملی</th><th>وضعیت</th>'+(canEdit?'<th>عملیات</th>':'')+'</tr></thead><tbody id="custBody"></tbody></table></div></div>';
+      paint('');
+      $('#custSearch').addEventListener('input', function(){ paint(this.value.trim().toLowerCase()); });
+      if(canEdit) $('#addCustomer').onclick = function(){ openCustomerModal(); };
+    });
+  }
+  function openCustomerModal(row){
+    row=row||{}; showModal('<h3>'+(row.id?'ویرایش مشتری':'مشتری جدید')+'</h3><div class="form-grid"><div class="form-group"><label>نام کامل <span class="req">*</span></label><input id="c_name" value="'+esc(row.full_name||'')+'"></div>'+ phoneField('c_mobile','موبایل',row.mobile,'mobile') + phoneField('c_phone','تلفن',row.phone,'phone') +'<div class="form-group"><label>کد ملی</label><input id="c_national_code" class="ltr-num" dir="ltr" inputmode="numeric" maxlength="10" value="'+esc(row.national_code||'')+'"></div></div><div class="form-group"><label>آدرس</label><input id="c_addr" value="'+esc(row.address||'')+'"></div><div class="form-group"><label>یادداشت</label><textarea id="c_notes">'+esc(row.notes||'')+'</textarea></div><div id="cAlert"></div><div class="row"><button class="btn gold" id="c_save">ذخیره</button><button class="btn secondary" id="c_cancel">انصراف</button></div>', function(close){
+      bindPhoneInputs();
+      var nat = $('#c_national_code');
+      if (nat) nat.addEventListener('input', function(){ this.value = sanitizePhoneValue(this.value).replace('+','').slice(0,10); });
+      $('#c_cancel').onclick=close;
+      $('#c_save').onclick=function(){
+        var mobile = $('#c_mobile').value, phone = $('#c_phone').value, name = ($('#c_name').value||'').trim();
+        var err = '';
+        if (!name) err = 'نام کامل مشتری الزامی است.';
+        else if (mobile && !/^09\d{9}$/.test(mobile)) err = 'شماره موبایل معتبر نیست. نمونه: 09121234567';
+        else if (phone && !/^0\d{8,10}$/.test(phone)) err = 'شماره تلفن معتبر نیست. نمونه: 02188776655';
+        if (err) { $('#cAlert').innerHTML = '<div class="alert error">' + esc(err) + '</div>'; return; }
+        var btn = this; btn.disabled = true;
+        var payload={id:row.id,full_name:name,mobile:mobile,phone:phone,national_code:$('#c_national_code').value,address:$('#c_addr').value,notes:$('#c_notes').value};
+        api(row.id?'customers.update':'customers.create',payload).then(function(){ toast('ذخیره شد','success'); close(); loadRoute('customers'); }).catch(function(e){ btn.disabled = false; $('#cAlert').innerHTML = '<div class="alert error">'+esc(e.message||'خطا')+'</div>'; });
+      };
+    });
+  }
+
+  function simpleCrudView(opts){
+    return api(opts.list,{}).then(function(rows){
+      rows = rows || [];
+      var canManage = opts.canManage();
+      var cols = opts.columns;
+      function cellValue(r, c){ return (typeof c.value === 'function') ? c.value(r) : r[c.key]; }
+      function rowHtml(r){
+        return '<tr>' + cols.map(function(c){ var v = cellValue(r, c); var cls = (c.key === 'mobile' || c.ltr) ? ' class="ltr-num"' : ''; return '<td'+cls+'>'+esc(v==null?'':v)+'</td>'; }).join('') +
+          (canManage ? '<td><button class="btn sm secondary" data-edit="'+esc(r.id)+'">ویرایش</button></td>' : '') + '</tr>';
+      }
+      function bindRows(){
+        if(!canManage) return;
+        $all('[data-edit]').forEach(function(b){
+          b.onclick = function(){
+            var id = b.getAttribute('data-edit');
+            var r = rows.filter(function(x){ return x.id === id; })[0];
+            opts.openModal(r, rows);
+          };
+        });
+      }
+      function paint(q){
+        var list = rows.filter(function(r){
+          if(!q) return true;
+          return cols.some(function(c){ var v = cellValue(r, c); return String(v == null ? '' : v).toLowerCase().indexOf(q) >= 0; });
+        });
+        $('#crudBody').innerHTML = list.map(rowHtml).join('');
+        $('#crudCount').textContent = fmtNum(list.length) + ' از ' + fmtNum(rows.length);
+        bindRows();
+      }
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>'+esc(opts.title)+'</h2>'+
+        '<div class="toolbar">'+
+          '<input id="crudSearch" class="input-sm search-input" type="search" placeholder="جستجو…" aria-label="جستجو در جدول">'+
+          '<span class="chip-count" id="crudCount"></span>'+
+          (canManage?'<button class="btn gold sm" id="addBtn">جدید</button>':'')+
+        '</div></div>'+
+        '<div class="table-wrap"><table><thead><tr>'+cols.map(function(c){return '<th>'+esc(c.label)+'</th>';}).join('')+(canManage?'<th>عملیات</th>':'')+'</tr></thead><tbody id="crudBody"></tbody></table></div></div>';
+      paint('');
+      $('#crudSearch').addEventListener('input', function(){ paint(this.value.trim().toLowerCase()); });
+      if(canManage) $('#addBtn').onclick = function(){ opts.openModal(null, rows); };
+    });
+  }
+
+  function viewDoctors(){ return simpleCrudView({ title:'تعریف پزشک', list:'doctors.list', canManage:function(){return state.user.role==='admin';}, columns:[{label:'نام',key:'full_name'},{label:'تخصص',key:'specialty'},{label:'موبایل',key:'mobile'}], openModal:function(row){ row=row||{}; showModal('<h3>'+(row.id?'ویرایش پزشک':'پزشک جدید')+'</h3><div class="form-grid"><div class="form-group"><label>نام</label><input id="f1" value="'+esc(row.full_name||'')+'"></div><div class="form-group"><label>تخصص</label><input id="f2" value="'+esc(row.specialty||'')+'"></div>'+phoneField('f3','موبایل',row.mobile,'mobile')+'</div><div class="form-group"><label>یادداشت</label><input id="f4" value="'+esc(row.notes||'')+'"></div><div class="row"><button class="btn gold" id="sv">ذخیره</button><button class="btn secondary" id="cn">انصراف</button></div>', function(close){ bindPhoneInputs(); $('#cn').onclick=close; $('#sv').onclick=function(){ api(row.id?'doctors.update':'doctors.create',{id:row.id,full_name:$('#f1').value,specialty:$('#f2').value,mobile:$('#f3').value,notes:$('#f4').value}).then(function(){toast('ذخیره شد','success'); close(); loadRoute('doctors');}).catch(function(e){toast(e.message||'خطا','error');}); };}); } }); }
+  function viewOperators(){ return simpleCrudView({ title:'تعریف اپراتور', list:'operators.list', canManage:function(){return state.user.role==='admin';}, columns:[{label:'نام',key:'full_name'},{label:'عنوان',key:'role_title'},{label:'موبایل',key:'mobile'}], openModal:function(row){ row=row||{}; showModal('<h3>'+(row.id?'ویرایش اپراتور':'اپراتور جدید')+'</h3><div class="form-grid"><div class="form-group"><label>نام</label><input id="f1" value="'+esc(row.full_name||'')+'"></div><div class="form-group"><label>عنوان نقش</label><input id="f2" value="'+esc(row.role_title||'')+'"></div>'+phoneField('f3','موبایل',row.mobile,'mobile')+'</div><div class="row"><button class="btn gold" id="sv">ذخیره</button><button class="btn secondary" id="cn">انصراف</button></div>', function(close){ bindPhoneInputs(); $('#cn').onclick=close; $('#sv').onclick=function(){ api(row.id?'operators.update':'operators.create',{id:row.id,full_name:$('#f1').value,role_title:$('#f2').value,mobile:$('#f3').value}).then(function(){toast('ذخیره شد','success'); close(); loadRoute('operators');}).catch(function(e){toast(e.message||'خطا','error');}); };}); } }); }
+  function commissionLabel(type, value) {
+    if (!type) return '<span class="muted">—</span>';
+    var v = Number(value || 0);
+    if (type === 'percent') return fmtNum(v) + '٪';
+    return fmtMoney(v) + ' / واحد';
+  }
+
+  function viewServices(){
+    return simpleCrudView({
+      title: 'تعریف خدمات',
+      list: 'services.list',
+      canManage: function(){ return state.user.role === 'admin'; },
+      columns: [
+        { label: 'نام', key: 'name' },
+        { label: 'دسته', key: 'category' },
+        { label: 'قیمت پایه', value: function(r){ return fmtMoney(r.base_price_toman); } },
+        { label: 'پورسانت دکتر', value: function(r){ return commissionLabel(r.doctor_commission_type, r.doctor_commission_value); } },
+        { label: 'پورسانت اپراتور', value: function(r){ return commissionLabel(r.operator_commission_type, r.operator_commission_value); } },
+        { label: 'مشمول مالیات', value: function(r){ return String(r.taxable) === 'false' ? 'خیر' : 'بله'; } }
+      ],
+      openModal: function(row){
+        row = row || {};
+        var typeOptions = function(selected){
+          return ['', 'percent', 'fixed_per_unit'].map(function(t){
+            var label = t === 'percent' ? 'درصدی' : (t === 'fixed_per_unit' ? 'مبلغ ثابت برای هر واحد' : 'بدون پورسانت');
+            return '<option value="' + t + '"' + ((selected || '') === t ? ' selected' : '') + '>' + label + '</option>';
+          }).join('');
+        };
+        showModal('<h3>' + (row.id ? 'ویرایش خدمت' : 'خدمت جدید') + '</h3>' +
+          '<div class="form-grid">' +
+            '<div class="form-group"><label>نام</label><input id="f1" value="' + esc(row.name || '') + '"></div>' +
+            '<div class="form-group"><label>دسته</label><input id="f2" value="' + esc(row.category || '') + '"></div>' +
+            '<div class="form-group"><label>قیمت پایه (تومان)</label><input id="f3" type="number" value="' + esc(row.base_price_toman || 0) + '"></div>' +
+            '<div class="form-group"><label>نرخ مالیات پیش‌فرض (%)</label><input id="f4" type="number" value="' + esc(row.default_tax_rate || 0) + '"></div>' +
+          '</div>' +
+          '<div class="form-group"><label><input type="checkbox" id="f5" ' + (String(row.taxable) !== 'false' ? 'checked' : '') + '> مشمول مالیات</label></div>' +
+          '<h4>پورسانت این خدمت</h4>' +
+          '<div class="help" style="margin-bottom:8px">این مقادیر پیش‌فرض خدمت هستند؛ اگر برای پزشک یا اپراتور قاعده اختصاصی در «تعریف پورسانت» ثبت شده باشد، همان قاعده ملاک محاسبه است.</div>' +
+          '<div class="form-grid">' +
+            '<div class="form-group"><label>پورسانت دکتر</label><select id="f6">' + typeOptions(row.doctor_commission_type) + '</select></div>' +
+            '<div class="form-group"><label>مقدار پورسانت دکتر</label><input id="f7" type="number" min="0" step="0.1" value="' + esc(row.doctor_commission_value || 0) + '"></div>' +
+            '<div class="form-group"><label>پورسانت اپراتور</label><select id="f8">' + typeOptions(row.operator_commission_type) + '</select></div>' +
+            '<div class="form-group"><label>مقدار پورسانت اپراتور</label><input id="f9" type="number" min="0" step="0.1" value="' + esc(row.operator_commission_value || 0) + '"></div>' +
+          '</div>' +
+          '<div class="row"><button class="btn gold" id="sv">ذخیره</button><button class="btn secondary" id="cn">انصراف</button></div>',
+        function(close){
+          $('#cn').onclick = close;
+          $('#sv').onclick = function(){
+            api(row.id ? 'services.update' : 'services.create', {
+              id: row.id,
+              name: $('#f1').value,
+              category: $('#f2').value,
+              base_price_toman: Number($('#f3').value || 0),
+              default_tax_rate: $('#f4').value,
+              taxable: $('#f5').checked,
+              doctor_commission_type: $('#f6').value,
+              doctor_commission_value: Number($('#f7').value || 0),
+              operator_commission_type: $('#f8').value,
+              operator_commission_value: Number($('#f9').value || 0)
+            }).then(function(){ toast('ذخیره شد', 'success'); close(); loadRoute('services'); })
+              .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+          };
+        });
+      }
+    });
+  }
+  function viewExpenses(){
+    if(state.user.role==='doctor'){ $('#content').innerHTML='<div class="panel">دسترسی ندارید.</div>'; return; }
+    return api('expenses.list',{}).then(function(rows){
+      var canCreate = state.user.role==='admin' || state.user.role==='operator';
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>هزینه‌ها</h2><div class="toolbar">'+(canCreate?'<button class="btn gold sm" id="addExp">ثبت هزینه</button>':'')+'</div></div><div class="table-wrap"><table><thead><tr><th>تاریخ</th><th>دسته</th><th>مبلغ</th><th>پرداخت‌شده به</th><th>شرح</th></tr></thead><tbody>'+ (rows||[]).map(function(r){ return '<tr><td>'+esc(r.date)+'</td><td>'+esc(r.category)+'</td><td>'+fmtMoney(r.amount_toman)+'</td><td>'+esc(r.payee)+'</td><td>'+esc(r.description)+'</td></tr>'; }).join('') +'</tbody></table></div></div>';
+      if(canCreate){ $('#addExp').onclick=function(){ showModal('<h3>ثبت هزینه</h3><div class="form-grid"><div class="form-group"><label>تاریخ (YYYY-MM-DD)</label><input id="e1" value="'+todayIso()+'"></div><div class="form-group"><label>دسته</label><input id="e2"></div><div class="form-group"><label>مبلغ (تومان)</label><input id="e3" type="number"></div><div class="form-group"><label>پرداخت‌شده به</label><input id="e4"></div></div><div class="form-group"><label>شرح</label><input id="e5"></div><div class="row"><button class="btn gold" id="sv">ذخیره</button><button class="btn secondary" id="cn">انصراف</button></div>', function(close){ $('#cn').onclick=close; $('#sv').onclick=function(){ api('expenses.create',{date:$('#e1').value,category:$('#e2').value,amount_toman:Number($('#e3').value||0),payee:$('#e4').value,description:$('#e5').value}).then(function(){toast('ثبت شد','success'); close(); loadRoute('expenses');}).catch(function(e){toast(e.message||'خطا','error');}); };}); }; }
+    });
+  }
+
+  function viewRevenue(){
+    return api('revenue.list',{}).then(function(rows){
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>درآمدهای متفرقه</h2><div class="toolbar"><button class="btn gold sm" id="addRev">ثبت درآمد متفرقه</button></div></div><div class="alert info">پرداخت‌های فاکتور به‌صورت جداگانه از فاکتورها محاسبه می‌شوند و در این بخش ثبت نمی‌شوند (جلوگیری از دوباره‌شماری).</div><div class="table-wrap"><table><thead><tr><th>تاریخ</th><th>منبع</th><th>مبلغ</th><th>شرح</th></tr></thead><tbody>'+ (rows||[]).map(function(r){ return '<tr><td>'+esc(r.date)+'</td><td>'+esc(r.source_type)+'</td><td>'+fmtMoney(r.amount_toman)+'</td><td>'+esc(r.description)+'</td></tr>'; }).join('') +'</tbody></table></div></div>';
+      $('#addRev').onclick=function(){ showModal('<h3>ثبت درآمد متفرقه</h3><div class="form-grid"><div class="form-group"><label>تاریخ</label><input id="r1" value="'+todayIso()+'"></div><div class="form-group"><label>نوع منبع</label><input id="r2" value="misc"></div><div class="form-group"><label>مبلغ (تومان)</label><input id="r3" type="number"></div></div><div class="form-group"><label>شرح</label><input id="r4"></div><div class="row"><button class="btn gold" id="sv">ذخیره</button><button class="btn secondary" id="cn">انصراف</button></div>', function(close){ $('#cn').onclick=close; $('#sv').onclick=function(){ api('revenue.create',{date:$('#r1').value,source_type:$('#r2').value,amount_toman:Number($('#r3').value||0),description:$('#r4').value}).then(function(){toast('ثبت شد','success'); close(); loadRoute('revenue');}).catch(function(e){toast(e.message||'خطا','error');}); };}); };
+    });
+  }
+
+  function viewCommissionRules(){
+    return api('commissionRules.list',{}).then(function(rows){
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>تعریف پورسانت</h2><div class="toolbar"><button class="btn gold sm" id="addRule">قاعده جدید</button></div></div><div class="alert info">percent یا fixed_per_unit. برای fixed_per_unit: <b>commission_amount = fixed_amount_per_unit × quantity</b> و quantity از InvoiceItems.quantity خوانده می‌شود.</div><div class="table-wrap"><table><thead><tr><th>ذینفع</th><th>شخص</th><th>خدمت</th><th>نوع</th><th>مقدار</th><th>اولویت</th><th>فعال</th></tr></thead><tbody>'+ (rows||[]).map(function(r){ return '<tr><td>'+esc(r.applies_to)+'</td><td>'+esc(r.person_id||'همه')+'</td><td>'+esc(r.service_id||'همه')+'</td><td>'+esc(r.type)+'</td><td>'+esc(r.value)+'</td><td>'+esc(r.priority)+'</td><td>'+esc(String(r.is_active)==='false'?'خیر':'بله')+'</td></tr>'; }).join('') +'</tbody></table></div></div>';
+      $('#addRule').onclick=function(){ showModal('<h3>قاعده پورسانت</h3><div class="form-grid"><div class="form-group"><label>ذینفع</label><select id="r1"><option value="doctor">doctor</option><option value="operator">operator</option></select></div><div class="form-group"><label>شناسه شخص (اختیاری)</label><input id="r2"></div><div class="form-group"><label>شناسه خدمت (اختیاری)</label><input id="r3"></div><div class="form-group"><label>نوع</label><select id="r4"><option value="percent">percent</option><option value="fixed_per_unit">fixed_per_unit</option></select></div><div class="form-group"><label>مقدار (درصد یا مبلغ واحد)</label><input id="r5" type="number"></div><div class="form-group"><label>اولویت</label><input id="r6" type="number" value="100"></div></div><div class="row"><button class="btn gold" id="sv">ذخیره</button><button class="btn secondary" id="cn">انصراف</button></div>', function(close){ $('#cn').onclick=close; $('#sv').onclick=function(){ api('commissionRules.upsert',{applies_to:$('#r1').value,person_id:$('#r2').value,service_id:$('#r3').value,type:$('#r4').value,value:$('#r5').value,priority:$('#r6').value}).then(function(){toast('ذخیره شد','success'); close(); loadRoute('commissionRules');}).catch(function(e){toast(e.message||'خطا','error');}); };}); };
+    });
+  }
+
+  function statusBadge(s){ var map={draft:['پیش‌نویس','info'],pending_discount_approval:['در انتظار تأیید تخفیف','warn'],issued:['صادرشده','success'],partially_paid:['پرداخت ناقص','warn'],paid:['پرداخت‌شده','success'],void:['باطل','danger'],calculated:['محاسبه‌شده','info'],payable:['قابل پرداخت','warn'],adjusted:['تعدیل‌شده','warn'],requested:['درخواست‌شده','warn'],approved:['تأییدشده','success'],rejected:['رد شده','danger'],none:['-','']}; var m=map[s]||[s,'info']; return badge(m[0],m[1]); }
+
+  function viewCommissions(){
+    return api('commissions.list',{}).then(function(rows){
+      var isAdmin = state.user.role==='admin';
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>پورسانت‌ها</h2><div class="toolbar">'+(isAdmin?'<button class="btn sm" id="approveSel">تأیید انتخاب‌شده‌ها (payable)</button><button class="btn gold sm" id="paySel">ثبت پرداخت انتخاب‌شده‌ها (paid)</button>':'')+'</div></div><div class="alert info">چرخه اجباری: <b>calculated → payable → paid</b>. گذار مستقیم calculated→paid مجاز نیست. فقط مدیر تأیید/پرداخت انجام می‌دهد و همه تغییرات در AuditLog ثبت می‌شود.</div><div class="table-wrap"><table><thead><tr>'+(isAdmin?'<th></th>':'')+'<th>فاکتور</th><th>ذینفع</th><th>مبنا</th><th>تعداد</th><th>مبلغ</th><th>وضعیت</th><th>مرجع پرداخت</th></tr></thead><tbody>'+ (rows||[]).map(function(r){ return '<tr>'+(isAdmin?'<td><input type="checkbox" class="csel" value="'+esc(r.id)+'" data-status="'+esc(r.status)+'"></td>':'')+'<td>'+esc(r.invoice_id)+'</td><td>'+esc(r.person_type+':'+r.person_id)+'</td><td>'+fmtMoney(r.commission_basis_toman)+'</td><td>'+esc(r.quantity)+'</td><td>'+fmtMoney(r.commission_amount_toman)+'</td><td>'+statusBadge(r.status)+'</td><td>'+esc(r.payment_reference||'')+'</td></tr>'; }).join('') +'</tbody></table></div></div>';
+      if(isAdmin){
+        $('#approveSel').onclick=function(){ var ids=$all('.csel:checked').filter(function(x){return x.getAttribute('data-status')==='calculated';}).map(function(x){return x.value;}); if(!ids.length){toast('مورد calculated انتخاب نشده است','error'); return;} api('commissions.approvePayable',{ids:ids}).then(function(){toast('تأیید شد (payable)','success'); loadRoute('commissions');}).catch(function(e){toast(e.message||'خطا','error');}); };
+        $('#paySel').onclick=function(){ var ids=$all('.csel:checked').filter(function(x){return x.getAttribute('data-status')==='payable';}).map(function(x){return x.value;}); if(!ids.length){toast('مورد payable انتخاب نشده است','error'); return;} promptModal({ title:'ثبت پرداخت پورسانت', message:'شماره مرجع / مدرک پرداخت را وارد کنید (اختیاری).', fields:[{key:'ref', label:'مرجع پرداخت', value:'', full:true}], submitLabel:'ثبت پرداخت', onSubmit:function(v, done){ api('commissions.markPaid',{ids:ids,payment_reference:v.ref||''}).then(function(){ toast('پرداخت ثبت شد (paid)','success'); done(); loadRoute('commissions'); }).catch(function(e){ toast(e.message||'خطا','error'); }); } }); };
+      }
+    });
+  }
+
+  function reportRangeBar(cal, r){
+    return '<div class="filter-bar">' +
+      '<div class="filter-group"><label>بازه گزارش</label><div class="segmented">' +
+        '<button type="button" class="seg-btn' + (r.preset==='today'?' active':'') + '" data-rep-preset="today">امروز</button>' +
+        '<button type="button" class="seg-btn' + (r.preset==='7d'?' active':'') + '" data-rep-preset="7d">۷ روز</button>' +
+        '<button type="button" class="seg-btn' + (r.preset==='month'?' active':'') + '" data-rep-preset="month">این ماه شمسی</button>' +
+      '</div></div>' +
+      '<div class="filter-group"><label for="repFrom">از تاریخ</label><input id="repFrom" class="input-sm" type="date" value="' + esc(r.from||'') + '"></div>' +
+      '<div class="filter-group"><label for="repTo">تا تاریخ</label><input id="repTo" class="input-sm" type="date" value="' + esc(r.to||'') + '"></div>' +
+      '<div class="filter-summary muted small">' + esc(faDate(r.from)) + ' تا ' + esc(faDate(r.to)) +
+        (cal && cal.month_label ? ' · ماه شمسی ' + esc(cal.month_label) : '') +
+        (cal && cal.week_label ? ' · هفته ' + esc(cal.week_label) : '') + '</div>' +
+    '</div>';
+  }
+
+  function viewReports(){
+    return ensureCalendar().then(function(cal){
+      var r = state.reportRange || (state.reportRange = { from:'', to:'', preset:'month' });
+      if (!r.from || !r.to) { r.from = cal.month_start || monthStart(cal.today); r.to = cal.today; }
+      var tab = state.reportTab || 'summary';
+      return Promise.all([
+        api('reports.summary', {}),
+        api('reports.period', { from: r.from, to: r.to, granularity: 'day' }),
+        api('reports.customers', { from: r.from, to: r.to }),
+        api('reports.services', { from: r.from, to: r.to }),
+        api('reports.insights', { from: r.from, to: r.to }).catch(function(){ return null; })
+      ]).then(function(res){
+        var s = res[0] || {}, p = res[1] || { buckets: [], totals: {} }, cust = res[2] || { rows: [], totals: {} };
+        var svc = res[3] || { rows: [], totals: {} }, ins = res[4] || null;
+        var tabs = [['summary','خلاصه'], ['customers','مشتریان'], ['services','خدمات']].map(function(t){
+          return '<button type="button" class="seg-btn' + (tab === t[0] ? ' active' : '') + '" data-rep-tab="' + t[0] + '">' + t[1] + '</button>';
+        }).join('');
+        var head = '<div class="panel"><div class="panel-header"><h2>گزارش‌ها</h2>' +
+          '<div class="toolbar"><div class="segmented">' + tabs + '</div></div></div>' + reportRangeBar(cal, r) + '</div>';
+        var body = (tab === 'customers') ? reportsCustomersHtml(cust)
+          : (tab === 'services') ? reportsServicesHtml(svc)
+          : reportsSummaryHtml(s, p, ins, cust);
+        $('#content').innerHTML = head + body;
+
+        $all('[data-rep-tab]').forEach(function(b){
+          b.onclick = function(){ state.reportTab = b.getAttribute('data-rep-tab'); loadRoute('reports'); };
+        });
+        $all('[data-rep-preset]').forEach(function(b){
+          b.onclick = function(){
+            var id = b.getAttribute('data-rep-preset');
+            if (id === 'today') { r.from = cal.today; r.to = cal.today; }
+            else if (id === '7d') { r.from = isoAddDays(cal.today, -6); r.to = cal.today; }
+            else { r.from = cal.month_start || monthStart(cal.today); r.to = cal.today; }
+            r.preset = id;
+            loadRoute('reports');
+          };
+        });
+        var rf = $('#repFrom'), rt = $('#repTo');
+        if (rf) rf.onchange = function(){ r.from = this.value; r.preset = ''; loadRoute('reports'); };
+        if (rt) rt.onchange = function(){ r.to = this.value; r.preset = ''; loadRoute('reports'); };
+        var go = $('#goCustomers');
+        if (go) go.onclick = function(){ navigate('customers'); };
+      });
+    });
+  }
+
+  function reportsCustomersHtml(c){
+    var rows = (c && c.rows) || [], t = (c && c.totals) || {};
+    var body = rows.length ? rows.map(function(r){
+      return '<tr><td>' + esc(r.full_name) + '</td><td>' + esc(r.mobile || '—') + '</td>' +
+        '<td class="num">' + fmtNum(r.invoices_count) + '</td>' +
+        '<td class="num">' + fmtMoney(r.invoiced_total) + '</td>' +
+        '<td class="num">' + fmtMoney(r.paid_total) + '</td>' +
+        '<td class="num">' + (Number(r.balance_total) > 0 ? '<b class="text-danger">' + fmtMoney(r.balance_total) + '</b>' : fmtMoney(0)) + '</td>' +
+        '<td>' + esc(r.last_visit ? faDate(r.last_visit) : '—') + '</td></tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">مشتری‌ای در این بازه پیدا نشد.</td></tr>';
+    return '<div class="panel" style="margin-top:14px"><div class="panel-header"><h2>گزارش مشتریان</h2>' +
+      '<div class="toolbar"><button class="btn sm secondary" id="goCustomers">مشاهده فهرست کامل مشتریان</button></div></div>' +
+      '<div class="grid cards">' +
+        card('تعداد مشتریان', fmtNum(t.customers), 'کل مشتریان ثبت‌شده') +
+        card('جمع فاکتورها', fmtMoney(t.invoiced_total), 'بازه انتخابی') +
+        card('جمع پرداخت‌ها', fmtMoney(t.paid_total), 'بازه انتخابی') +
+        card('جمع مانده', fmtMoney(t.balance_total), 'مطالبات باز') +
+      '</div>' +
+      '<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>مشتری</th><th>موبایل</th><th>تعداد فاکتور</th><th>جمع خرید</th><th>پرداخت</th><th>مانده</th><th>آخرین مراجعه</th></tr></thead><tbody>' + body + '</tbody></table></div></div>';
+  }
+
+  function reportsServicesHtml(sv){
+    var rows = (sv && sv.rows) || [], t = (sv && sv.totals) || {};
+    var body = rows.length ? rows.map(function(r){
+      return '<tr><td>' + esc(r.name) + '</td><td class="num">' + fmtNum(r.quantity) + '</td>' +
+        '<td class="num">' + fmtNum(r.invoices_count) + '</td><td class="num">' + fmtMoney(r.amount) + '</td></tr>';
+    }).join('') : '<tr><td colspan="4" class="empty-state">فروشی در این بازه ثبت نشده است.</td></tr>';
+    return '<div class="panel" style="margin-top:14px"><div class="panel-header"><h2>فروش به تفکیک خدمت</h2></div>' +
+      '<div class="table-wrap"><table><thead><tr><th>خدمت</th><th>تعداد</th><th>تعداد فاکتور</th><th>مبلغ</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+      '<div class="muted small" style="margin-top:8px">جمع: ' + fmtNum(t.quantity) + ' مورد · ' + fmtMoney(t.amount) + '</div></div>';
+  }
+
+  function reportsSummaryHtml(s, p, ins, cust){
+    var t = (p && p.totals) || {};
+    var statuses = ['draft','pending_discount_approval','issued','partially_paid','paid','void'];
+    var invByStatus = (s && s.invoices_by_status) || {};
+    var invRows = statuses.map(function(st){
+      return '<tr><td>' + esc(invoiceStatusLabel(st)) + '</td><td class="num">' + fmtNum(invByStatus[st] || 0) + '</td></tr>';
+    }).join('');
+    var commMap = (s && s.commissions_amount_by_status) || {};
+    var commRows = Object.keys(commMap).map(function(k){
+      return '<tr><td>' + esc(invoiceStatusLabel(k)) + '</td><td class="num">' + fmtMoney(commMap[k]) + '</td></tr>';
+    }).join('') || '<tr><td colspan="2" class="empty-state">پورسانتی ثبت نشده است.</td></tr>';
+    var debtors = ((cust && cust.rows) || []).filter(function(r){ return Number(r.balance_total) > 0; }).slice(0, 8);
+    var debtorRows = debtors.length ? debtors.map(function(r){
+      return '<tr><td>' + esc(r.full_name) + '</td><td>' + esc(r.mobile || '—') + '</td><td class="num">' + fmtNum(r.invoices_count) + '</td><td class="num"><b class="text-danger">' + fmtMoney(r.balance_total) + '</b></td></tr>';
+    }).join('') : '<tr><td colspan="4" class="empty-state">مطالبه باز وجود ندارد.</td></tr>';
+    return '<div class="grid cards" style="margin-top:14px">' +
+        card('جمع درآمد بازه', fmtMoney(t.income), 'پرداخت فاکتور + درآمد متفرقه') +
+        card('جمع هزینه بازه', fmtMoney(t.expense), 'هزینه‌های ثبت‌شده') +
+        card('خالص بازه', fmtMoney(t.net), Number(t.net) < 0 ? 'زیان' : 'سود') +
+        card('تعداد فاکتور', fmtNum(t.invoices_count), 'بدون فاکتورهای باطل') +
+        card('پورسانت قابل پرداخت', fmtMoney(t.commission_payable), 'در انتظار تسویه') +
+      '</div>' +
+      '<div class="panel" style="margin-top:14px"><div class="panel-header"><h2>روند درآمد و هزینه</h2></div>' +
+        '<div class="chart-card">' + chartSvg(p) + '</div>' + (ins ? insightsHtml(ins) : '') + '</div>' +
+      '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-top:14px">' +
+        '<div class="panel"><h2>وضعیت فاکتورها</h2><div class="table-wrap"><table><thead><tr><th>وضعیت</th><th>تعداد</th></tr></thead><tbody>' + invRows + '</tbody></table></div></div>' +
+        '<div class="panel"><h2>پورسانت به تفکیک وضعیت</h2><div class="table-wrap"><table><thead><tr><th>وضعیت</th><th>مبلغ</th></tr></thead><tbody>' + commRows + '</tbody></table></div></div>' +
+      '</div>' +
+      '<div class="panel" style="margin-top:14px"><h2>فاکتورهای دارای مانده</h2><div class="table-wrap"><table><thead><tr><th>مشتری</th><th>موبایل</th><th>تعداد فاکتور</th><th>مانده</th></tr></thead><tbody>' + debtorRows + '</tbody></table></div></div>';
+  }
+
+  function viewUsers(){
+    return Promise.all([api('users.list',{}), api('doctors.list',{}), api('operators.list',{})]).then(function(res){
+      var rows=res[0]||[], doctors=res[1]||[], operators=res[2]||[];
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>کاربران</h2><div class="toolbar"><button class="btn gold sm" id="addUser">کاربر جدید</button></div></div><div class="table-wrap"><table><thead><tr><th>نام کاربری</th><th>نام</th><th>نقش</th><th>فعال</th><th>آخرین ورود</th></tr></thead><tbody>'+ rows.map(function(u){ return '<tr><td>'+esc(u.username)+'</td><td>'+esc(u.display_name)+'</td><td>'+esc(roleLabel(u.role))+'</td><td>'+ (u.is_active?'بله':'خیر') +'</td><td class="ltr-num">'+esc(u.last_login_at||'')+'</td></tr>'; }).join('') +'</tbody></table></div></div>';
+      $('#addUser').onclick=function(){ showModal('<h3>کاربر جدید</h3><div class="form-grid"><div class="form-group"><label>نام کاربری</label><input id="u1"></div><div class="form-group"><label>رمز عبور</label><input id="u2" type="password"></div><div class="form-group"><label>نام نمایشی</label><input id="u3"></div><div class="form-group"><label>نقش</label><select id="u4"><option value="admin">مدیر</option><option value="operator">اپراتور</option><option value="doctor">پزشک</option></select></div><div class="form-group"><label>شناسه پزشک (برای نقش پزشک)</label><select id="u5"><option value="">-</option>'+doctors.map(function(d){return '<option value="'+esc(d.id)+'">'+esc(d.full_name)+'</option>';}).join('')+'</select></div><div class="form-group"><label>شناسه اپراتور (اختیاری)</label><select id="u6"><option value="">-</option>'+operators.map(function(o){return '<option value="'+esc(o.id)+'">'+esc(o.full_name)+'</option>';}).join('')+'</select></div></div><div class="row"><button class="btn gold" id="sv">ذخیره</button><button class="btn secondary" id="cn">انصراف</button></div>', function(close){ $('#cn').onclick=close; $('#sv').onclick=function(){ api('users.create',{username:$('#u1').value,password:$('#u2').value,display_name:$('#u3').value,role:$('#u4').value,linked_doctor_id:$('#u5').value,linked_operator_id:$('#u6').value}).then(function(){toast('کاربر ایجاد شد','success'); close(); loadRoute('users');}).catch(function(e){toast(e.message||'خطا','error');}); };}); };
+    });
+  }
+
+  function settingFieldHtml(s){
+    var val = (s.value === undefined || s.value === null) ? '' : String(s.value);
+    var control = '';
+    if (s.type === 'boolean') {
+      control = '<label class="switch"><input type="checkbox" data-set-key="' + esc(s.key) + '"' + (val === 'true' ? ' checked' : '') + (s.readonly ? ' disabled' : '') + '><span class="switch-track" aria-hidden="true"></span><span class="switch-label" data-switch-label="' + esc(s.key) + '">' + (val === 'true' ? 'فعال' : 'غیرفعال') + '</span></label>';
+    } else if (s.type === 'number') {
+      control = '<input class="input-sm" type="number" data-set-key="' + esc(s.key) + '" value="' + esc(val) + '"' +
+        (s.min !== undefined ? ' min="' + esc(s.min) + '"' : '') + (s.max !== undefined ? ' max="' + esc(s.max) + '"' : '') +
+        (s.step !== undefined ? ' step="' + esc(s.step) + '"' : '') + (s.readonly ? ' disabled' : '') + '>';
+    } else {
+      control = '<input class="input-sm" type="text" data-set-key="' + esc(s.key) + '" value="' + esc(val) + '"' + (s.readonly ? ' disabled' : '') + '>';
+    }
+    return '<div class="setting' + (s.readonly ? ' readonly' : '') + '">' +
+      '<div class="setting-head"><span class="setting-title">' + esc(s.label) + '</span>' +
+        '<span class="badge info">' + esc(s.scope || '') + '</span></div>' +
+      control +
+      '<div class="help"><b>راهنما:</b> ' + esc(s.help || '') + '</div>' +
+      '<div class="effect"><b>تأثیر در نرم‌افزار:</b> ' + esc(s.effect || '') + '</div>' +
+      '<div class="muted small">کلید: <code>' + esc(s.key) + '</code>' + (s.updated_at ? ' · آخرین تغییر: ' + esc(String(s.updated_at).substring(0, 16).replace('T', ' ')) : '') + (s.readonly ? ' · فقط خواندنی' : '') + '</div>' +
+    '</div>';
+  }
+
+  function settingsHtml(cat){
+    var groups = (cat && cat.groups) || [];
+    var items = (cat && cat.settings) || [];
+    var byGroup = {};
+    items.forEach(function(s){ (byGroup[s.group] = byGroup[s.group] || []).push(s); });
+    var html = '<div class="panel"><div class="panel-header"><h2>تنظیمات</h2>' +
+        '<div class="toolbar"><button class="btn gold sm" id="saveSettings">ذخیره تنظیمات</button><span class="muted small" id="setStatus"></span></div></div>' +
+        '<div class="alert info">تغییر تنظیمات روی فاکتورهای جدید اثر می‌گذارد و رکوردهای مالی صادرشده را بازنویسی نمی‌کند. اجرای Setup فقط ساختار شیت‌ها را می‌سازد (بدون داده نمونه).</div>' +
+        '<div class="row"><button class="btn secondary sm" id="runSetup">اجرای Setup شیت‌ها</button></div></div>';
+    groups.forEach(function(g){
+      if (!byGroup[g] || !byGroup[g].length) return;
+      html += '<div class="panel settings-panel" style="margin-top:14px"><h2>' + esc(g) + '</h2>' +
+        byGroup[g].map(settingFieldHtml).join('') + '</div>';
+    });
+    // Danger zone — admin only (the server enforces it as well).
+    html += '<div class="panel danger-zone" style="margin-top:14px">' +
+      '<h2>حذف کلیه اطلاعات</h2>' +
+      '<div class="alert danger"><b>هشدار:</b> این عملیات تمام داده‌های عملیاتی (مشتریان، پزشکان، اپراتورها، خدمات، فاکتورها، پرداخت‌ها، هزینه‌ها، درآمدها و پورسانت‌ها) را حذف می‌کند. حساب مدیر، کاربران، تنظیمات، ساختار شیت‌ها و Audit Log حذف نمی‌شوند.</div>' +
+      '<div id="wipeSummary" class="muted small">در حال دریافت اطلاعات…</div>' +
+      '<div class="row" style="margin-top:10px">' +
+        '<button type="button" class="btn secondary sm" id="wipeBackup">تهیه نسخه پشتیبان (JSON)</button>' +
+        '<button type="button" class="btn danger sm" id="wipeStart">حذف کلیه اطلاعات…</button>' +
+      '</div></div>';
+    return html;
+  }
+
+  /* --------------------------------------------------------- data maintenance --
+     Danger zone in Settings: JSON backup download + a two-step, phrase-confirmed
+     wipe. Both endpoints are admin-only on the server as well. ---------------- */
+  function downloadJson(name, obj){
+    var text = JSON.stringify(obj, null, 2);
+    var blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){ URL.revokeObjectURL(url); try { document.body.removeChild(a); } catch (e) {} }, 1500);
+  }
+
+  function renderWipeSummary(){
+    var box = $('#wipeSummary');
+    if (!box) return;
+    api('system.dataSummary', {}).then(function(s){
+      var rows = (s.wipe || []).map(function(x){ return '<li><span>' + esc(x.label) + '</span><b class="ltr-num">' + fmtNum(x.rows) + '</b></li>'; }).join('');
+      var kept = (s.kept || []).map(function(x){ return x.sheet; }).join(' · ');
+      box.innerHTML = '<div class="wipe-grid"><div><div class="wipe-title">داده‌هایی که حذف می‌شوند</div><ul class="wipe-list">' + rows + '</ul>' +
+        '<div class="muted small">مجموع: ' + fmtNum(s.total_rows) + ' ردیف</div></div>' +
+        '<div><div class="wipe-title">دست‌نخورده می‌ماند</div><div class="muted small ltr">' + esc(kept) + '</div>' +
+        '<div class="muted small" style="margin-top:6px">حساب مدیر، کاربران، تنظیمات، ساختار شیت‌ها و Audit Log حذف نمی‌شوند.</div></div></div>';
+    }).catch(function(e){ box.textContent = e.message || 'خطا در دریافت اطلاعات'; });
+  }
+
+  function startWipe(){
+    confirmModal({
+      title: 'حذف کلیه اطلاعات',
+      tone: 'danger',
+      message: 'این عملیات تمام مشتریان، پزشکان، اپراتورها، خدمات، فاکتورها، پرداخت‌ها، هزینه‌ها، درآمدها و پورسانت‌ها را حذف می‌کند. پیش از ادامه از اطلاعات نسخه پشتیبان بگیرید. این کار قابل بازگشت نیست (به‌جز بازیابی از فایل پشتیبان).',
+      confirmLabel: 'متوجه شدم، ادامه',
+      onConfirm: function(){
+        promptModal({
+          title: 'تأیید نهایی حذف',
+          tone: 'danger',
+          message: 'برای تأیید، عبارت «حذف کلیه اطلاعات» را دقیقاً وارد کنید.',
+          fields: [{ key: 'phrase', label: 'عبارت تأیید', required: true, full: true, dir: 'rtl', placeholder: 'حذف کلیه اطلاعات' }],
+          submitLabel: 'حذف نهایی',
+          validate: function(v){ return String(v.phrase || '').trim() === 'حذف کلیه اطلاعات' ? '' : 'عبارت تأیید مطابقت ندارد.'; },
+          onSubmit: function(v, done){
+            api('system.wipeData', { confirm: true, phrase: v.phrase }).then(function(res){
+              done();
+              toast('اطلاعات حذف شد (' + fmtNum(res.total || 0) + ' ردیف)', 'success');
+              loadRoute('settings');
+            }).catch(function(e){
+              toast(e.message || 'خطا در حذف اطلاعات', 'error');
+            });
+          }
+        });
+      }
+    });
+  }
+
+  function viewSettings(){
+    return api('settings.catalog', {}).then(function(cat){
+      $('#content').innerHTML = settingsHtml(cat);
+      $('#runSetup').onclick = function(){
+        api('setup.run', {}).then(function(){ toast('راه‌اندازی انجام شد', 'success'); }).catch(function(e){ toast(e.message || 'خطا', 'error'); });
+      };
+      renderWipeSummary();
+      var wipeStart = $('#wipeStart');
+      if (wipeStart) wipeStart.onclick = startWipe;
+      var wipeBackup = $('#wipeBackup');
+      if (wipeBackup) wipeBackup.onclick = function(){
+        wipeBackup.disabled = true;
+        api('system.exportData', {}).then(function(data){
+          var stamp = (data && data.exported_at ? data.exported_at : new Date().toISOString()).replace(/[:.]/g, '-').substring(0, 19);
+          downloadJson('wrc-backup-' + stamp + '.json', data);
+          toast('نسخه پشتیبان دانلود شد', 'success');
+        }).catch(function(e){ toast(e.message || 'خطا در تهیه پشتیبان', 'error'); })
+          .then(function(){ wipeBackup.disabled = false; });
+      };
+      $all('[data-set-key]').forEach(function(el){
+        if (el.type === 'checkbox') el.onchange = function(){ var l = document.querySelector('[data-switch-label="' + el.getAttribute('data-set-key') + '"]'); if (l) l.textContent = el.checked ? 'فعال' : 'غیرفعال'; };
+      });
+      $('#saveSettings').onclick = function(){
+        var values = {};
+        $all('[data-set-key]').forEach(function(el){
+          if (el.disabled) return;
+          values[el.getAttribute('data-set-key')] = (el.type === 'checkbox') ? (el.checked ? 'true' : 'false') : el.value;
+        });
+        var btn = this; btn.disabled = true;
+        var st = $('#setStatus'); if (st) st.textContent = 'در حال ذخیره…';
+        api('settings.setMany', { values: values }).then(function(){
+          toast('تنظیمات ذخیره شد', 'success');
+          loadRoute('settings');
+        }).catch(function(e){
+          btn.disabled = false;
+          if (st) st.textContent = '';
+          toast(e.message || 'خطا در ذخیره تنظیمات', 'error');
+        });
+      };
+    });
+  }
+  function viewInvoices(){
+    return ensureCalendar().then(function(cal){
+      var f = state.invFilter || (state.invFilter = { status:'', from:'', to:'', preset:'' });
+      var canCreate = state.user.role === 'admin' || state.user.role === 'operator';
+      return Promise.all([
+        api('invoices.query', { status: f.status || '', from: f.from || '', to: f.to || '' }),
+        canCreate ? api('customers.list', {}) : Promise.resolve([]),
+        canCreate ? api('doctors.list', {}) : Promise.resolve([]),
+        canCreate ? api('services.list', {}) : Promise.resolve([]),
+        canCreate ? api('operators.list', {}) : Promise.resolve([])
+      ]).then(function(res){
+        var q = res[0] || { rows: [], statuses: [], total: 0, filtered_count: 0, counts: {} };
+        var rows = q.rows || [], customers = res[1] || [], doctors = res[2] || [], services = res[3] || [], operators = res[4] || [];
+        var cName = {};
+      customers.forEach(function(c){ cName[String(c.id)] = c.full_name || ''; });
+      var oName = {};
+      operators.forEach(function(o){ oName[String(o.id)] = o.full_name || ''; });
+      function money(n){ var v = Number(n||0); return v ? fmtMoney(v) : '<span class="muted">—</span>'; }
+      var statusOpts = '<option value="">همه وضعیت‌ها (' + fmtNum(q.total) + ')</option>' + (q.statuses || []).map(function(s){
+        return '<option value="' + esc(s.value) + '"' + (f.status === s.value ? ' selected' : '') + '>' + esc(s.label) + ' (' + fmtNum(s.count) + ')</option>';
+      }).join('');
+      var filterBar = '<div class="filter-bar">' +
+        '<div class="filter-group"><label for="invStatus">فیلتر وضعیت</label><select id="invStatus" class="input-sm">' + statusOpts + '</select></div>' +
+        '<div class="filter-group"><label for="invFrom">از تاریخ</label><input id="invFrom" class="input-sm" type="date" value="' + esc(f.from||'') + '"></div>' +
+        '<div class="filter-group"><label for="invTo">تا تاریخ</label><input id="invTo" class="input-sm" type="date" value="' + esc(f.to||'') + '"></div>' +
+        '<div class="filter-group"><label>بازه سریع</label><div class="segmented">' +
+          '<button type="button" class="seg-btn' + (f.preset==='today'?' active':'') + '" data-inv-preset="today">امروز</button>' +
+          '<button type="button" class="seg-btn' + (f.preset==='7d'?' active':'') + '" data-inv-preset="7d">۷ روز</button>' +
+          '<button type="button" class="seg-btn' + (f.preset==='month'?' active':'') + '" data-inv-preset="month">این ماه شمسی</button>' +
+          '<button type="button" class="seg-btn' + (f.preset==='clear'?' active':'') + '" data-inv-preset="clear">همه</button>' +
+        '</div></div>' +
+        '<div class="filter-summary muted small">' +
+          (cal && cal.jalali_label ? ('امروز ' + esc(cal.jalali_label) + ' · ') : '') +
+          'نمایش ' + fmtNum(rows.length) + ' از ' + fmtNum(q.total) + ' فاکتور' +
+          (f.from || f.to ? ' · بازه: ' + esc(f.from || '…') + ' تا ' + esc(f.to || '…') : '') +
+        '</div>' +
+      '</div>' +
+      (rows.length ? '' : '<div class="alert info">فاکتوری با این فیلترها پیدا نشد.</div>');
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>ثبت فاکتور</h2><div class="toolbar">'+(canCreate?'<button class="btn gold sm" id="newInv">فاکتور جدید</button>':'')+'</div></div>'+filterBar+'<div class="table-wrap"><table><thead><tr><th>شماره</th><th>تاریخ</th><th>مشتری</th><th>اپراتور</th><th>جمع</th><th>پرداخت</th><th>مانده</th><th>وضعیت</th><th>عملیات</th></tr></thead><tbody>'+ rows.map(function(r){ return '<tr><td class="ltr-num">'+esc(r.invoice_no||'-')+'</td><td class="ltr-num">'+esc(r.invoice_date)+'</td><td>'+esc(cName[String(r.customer_id)]||'—')+'</td><td>'+esc(oName[String(r.operator_id)]||'—')+'</td><td>'+fmtMoney(r.total_toman)+'</td><td>'+money(r.paid_toman)+'</td><td>'+money(r.balance_toman)+'</td><td>'+statusBadge(r.status)+'</td><td><button class="btn sm secondary" data-view="'+esc(r.id)+'">مشاهده</button></td></tr>'; }).join('') +'</tbody></table></div></div>';
+      if(canCreate) $('#newInv').onclick=function(){ openInvoiceModal(null, customers, doctors, services, operators); };
+      $('#invStatus').onchange = function(){ state.invFilter.status = this.value; state.invFilter.preset = ''; loadRoute('invoices'); };
+      $('#invFrom').onchange = function(){ state.invFilter.from = this.value; state.invFilter.preset = ''; loadRoute('invoices'); };
+      $('#invTo').onchange = function(){ state.invFilter.to = this.value; state.invFilter.preset = ''; loadRoute('invoices'); };
+      $all('[data-inv-preset]').forEach(function(b){
+        b.onclick = function(){
+          var id = b.getAttribute('data-inv-preset');
+          if (id === 'today') { state.invFilter.from = cal.today; state.invFilter.to = cal.today; }
+          else if (id === '7d') { state.invFilter.from = isoAddDays(cal.today, -6); state.invFilter.to = cal.today; }
+          else if (id === 'month') { state.invFilter.from = cal.month_start || monthStart(cal.today); state.invFilter.to = cal.today; }
+          else { state.invFilter.from = ''; state.invFilter.to = ''; }
+          state.invFilter.preset = id;
+          loadRoute('invoices');
+        };
+      });
+      $all('[data-view]').forEach(function(b){ b.onclick=function(){ openInvoiceDetail(b.getAttribute('data-view'), customers, doctors, services, operators); }; });
+      });
+    });
+  }
+
+/**
+   * Invoice form (redesigned in 0.4.2).
+   * Order: 1) header data (date, customer, doctor, operator) 2) line items
+   * 3) discount (amount or percent + note) and a live, server-verified summary.
+   */
+  function openInvoiceModal(row, customers, doctors, services, operators){
+    row = row || {};
+    var isAdmin = state.user.role === 'admin';
+    var canCreateCustomer = state.user.role === 'admin' || state.user.role === 'operator';
+    var defaultDate = (state.calendar && state.calendar.today) || todayIso();
+    var items = (row.items && row.items.length ? row.items : [{ service_id:'', quantity:1, unit_price_toman:0, description:'' }])
+      .map(function(it){
+        return {
+          service_id: it.service_id || '',
+          quantity: Number(it.quantity || 1) || 1,
+          unit_price_toman: Number(it.unit_price_toman || 0) || 0,
+          description: it.description || ''
+        };
+      });
+    var discMode = 'amount';
+    var discValue = Number(row.discount_requested_toman || 0) || 0;
+    var previewSeq = 0, previewTimer = null;
+
+    function svcById(id){
+      for (var i = 0; i < services.length; i++) { if (String(services[i].id) === String(id)) return services[i]; }
+      return null;
+    }
+    function lineGross(it){ return Math.max(0, Math.round(Number(it.quantity || 0) * Number(it.unit_price_toman || 0))); }
+    function localSubtotal(){ var s = 0; for (var i = 0; i < items.length; i++) { s += lineGross(items[i]); } return s; }
+    function discountAmount(sub){
+      if (discMode === 'percent') {
+        var pct = Math.max(0, Math.min(100, Number(discValue || 0)));
+        return Math.round(sub * pct / 100);
+      }
+      return Math.max(0, Math.min(sub, Math.round(Number(discValue || 0))));
+    }
+    function opts(list, selected, placeholder){
+      var out = '<option value="">' + placeholder + '</option>';
+      (list || []).forEach(function(x){
+        out += '<option value="' + esc(x.id) + '"' + (String(x.id) === String(selected) ? ' selected' : '') + '>' + esc(x.full_name) + '</option>';
+      });
+      return out;
+    }
+    function serviceOptions(selected){
+      var out = '<option value="">— انتخاب خدمت —</option>';
+      (services || []).forEach(function(s){
+        out += '<option value="' + esc(s.id) + '"' + (String(s.id) === String(selected) ? ' selected' : '') + '>' + esc(s.name) + '</option>';
+      });
+      return out;
+    }
+    function itemRow(it, i){
+      var svc = svcById(it.service_id);
+      return '<div class="item-row" data-row="' + i + '">' +
+        '<div class="item-field item-service">' +
+          '<label for="ivsvc' + i + '">خدمت</label>' +
+          '<select id="ivsvc' + i + '" data-i="' + i + '" data-k="service_id">' + serviceOptions(it.service_id) + '</select>' +
+          '<div class="item-name' + (svc ? '' : ' muted') + '" data-name="' + i + '">' + esc(svc ? svc.name : 'خدمتی انتخاب نشده') + '</div>' +
+          '<input class="item-desc" data-i="' + i + '" data-k="description" placeholder="شرح این ردیف (اختیاری)" value="' + esc(it.description || '') + '">' +
+        '</div>' +
+        '<div class="item-field item-qty"><label for="ivqty' + i + '">تعداد</label>' +
+          '<input id="ivqty' + i + '" type="number" min="1" step="1" inputmode="numeric" data-i="' + i + '" data-k="quantity" value="' + esc(it.quantity) + '"></div>' +
+        '<div class="item-field item-price"><label for="ivprice' + i + '">مبلغ واحد (تومان)</label>' +
+          '<input id="ivprice' + i + '" type="number" min="0" step="1000" inputmode="numeric" data-i="' + i + '" data-k="unit_price_toman" value="' + esc(it.unit_price_toman) + '"></div>' +
+        '<div class="item-field item-line-total"><label>جمع ردیف</label><div class="line-total" data-line="' + i + '">' + fmtMoney(lineGross(it)) + '</div></div>' +
+        '<button type="button" class="btn sm danger item-del" data-del="' + i + '" title="حذف این ردیف" aria-label="حذف ردیف ' + (i + 1) + '">✕</button>' +
+      '</div>';
+    }
+    function formHtml(){
+      return '<h3>ثبت فاکتور جدید</h3>' +
+        '<div class="inv-form">' +
+          '<div id="ivAlert" role="alert"></div>' +
+          '<section class="form-section">' +
+            '<div class="form-section-head"><span class="step">۱</span><div><h4>اطلاعات اولیه</h4>' +
+              '<p class="muted small">تاریخ فاکتور، مشتری، پزشک و اپراتور</p></div></div>' +
+            '<div class="form-grid">' +
+              '<div class="form-group"><label for="iv_date">تاریخ فاکتور <span class="req">*</span></label>' +
+                '<input id="iv_date" type="date" value="' + esc(row.invoice_date || defaultDate) + '"></div>' +
+              (canCreateCustomer ? '<div class="form-group"><label>مشتری جدید</label>' +
+                '<button type="button" class="btn secondary block" id="iv_new_cust_toggle">+ ایجاد مشتری جدید</button></div>' : '') +
+              '<div class="form-group"><label for="iv_cust">انتخاب مشتری <span class="req">*</span></label>' +
+                '<select id="iv_cust">' + opts(customers, row.customer_id, '— انتخاب مشتری —') + '</select></div>' +
+              '<div class="form-group"><label for="iv_doc">پزشک</label>' +
+                '<select id="iv_doc">' + opts(doctors, row.doctor_id, '— بدون پزشک —') + '</select></div>' +
+              '<div class="form-group"><label for="iv_op">اپراتور</label>' +
+                '<select id="iv_op">' + opts(operators, row.operator_id, '— بدون اپراتور —') + '</select></div>' +
+            '</div>' +
+            (canCreateCustomer ? '<div id="iv_new_cust" class="new-customer-panel" hidden>' +
+              '<div class="small muted">مشتری جدید پس از ثبت، به‌صورت خودکار در همین فاکتور انتخاب می‌شود.</div>' +
+              '<div class="form-grid">' +
+                '<div class="form-group"><label for="iv_nc_name">نام کامل <span class="req">*</span></label><input id="iv_nc_name"></div>' +
+                '<div class="form-group"><label for="iv_nc_mobile">موبایل</label><input id="iv_nc_mobile" inputmode="numeric"></div>' +
+                '<div class="form-group"><label for="iv_nc_phone">تلفن</label><input id="iv_nc_phone"></div>' +
+              '</div>' +
+              '<button type="button" class="btn sm gold" id="iv_nc_save">ثبت و اتصال به فاکتور</button>' +
+            '</div>' : '') +
+          '</section>' +
+          '<section class="form-section">' +
+            '<div class="form-section-head"><span class="step">۲</span><div><h4>اقلام فاکتور</h4>' +
+              '<p class="muted small">خدمت، تعداد، مبلغ واحد و جمع هر ردیف</p></div></div>' +
+            '<div id="invItems" class="items-list"></div>' +
+            '<button type="button" class="btn secondary sm" id="addItem">+ افزودن خدمت</button>' +
+          '</section>' +
+          '<section class="form-section">' +
+            '<div class="form-section-head"><span class="step">۳</span><div><h4>تخفیف</h4>' +
+              '<p class="muted small">' + (isAdmin ? 'ثبت تخفیف برای فاکتور' : 'درخواست تخفیف (پس از تأیید مدیر اعمال می‌شود)') + '</p></div></div>' +
+            '<div class="form-grid">' +
+              '<div class="form-group"><label for="iv_disc_mode">نوع تخفیف</label>' +
+                '<select id="iv_disc_mode"><option value="amount">مبلغ (تومان)</option><option value="percent">درصد (%)</option></select></div>' +
+              '<div class="form-group"><label for="iv_disc_value">مقدار تخفیف</label>' +
+                '<input id="iv_disc_value" type="number" min="0" inputmode="numeric" placeholder="۰"></div>' +
+              '<div class="form-group form-span"><label for="iv_disc_note">شرح تخفیف</label>' +
+                '<input id="iv_disc_note" placeholder="دلیل تخفیف (اختیاری)" value="' + esc(row.discount_request_note || '') + '"></div>' +
+            '</div>' +
+          '</section>' +
+          '<section class="inv-summary" aria-live="polite">' +
+            '<div class="sum-row"><span>جمع کل خدمات</span><b id="sumSub">—</b></div>' +
+            '<div class="sum-row"><span>مجموع تخفیف</span><b id="sumDisc">—</b></div>' +
+            '<div class="sum-row" id="sumTaxRow" hidden><span>مالیات <span class="muted small" id="sumTaxRate"></span></span><b id="sumTax">—</b></div>' +
+            '<div class="sum-row total"><span id="sumTotalLabel">مبلغ نهایی قابل پرداخت</span><b id="sumTotal">—</b></div>' +
+            '<div class="sum-note muted small" id="sumNote"></div>' +
+          '</section>' +
+        '</div>' +
+        '<div class="row" style="margin-top:var(--sp-4)">' +
+          '<button type="button" class="btn gold" id="saveInv">ذخیره فاکتور</button>' +
+          '<button type="button" class="btn secondary" id="cnInv">انصراف</button>' +
+          '<span class="muted small" id="saveHint"></span>' +
+        '</div>';
+    }
+    function buildPayload(){
+      return {
+        id: row.id || '',
+        invoice_date: ($('#iv_date') || {}).value || '',
+        customer_id: ($('#iv_cust') || {}).value || '',
+        doctor_id: ($('#iv_doc') || {}).value || '',
+        operator_id: ($('#iv_op') || {}).value || '',
+        discount_requested_toman: discountAmount(localSubtotal()),
+        discount_request_note: (($('#iv_disc_note') || {}).value || ''),
+        notes: row.notes || '',
+        items: items.filter(function(it){
+          return it.service_id || Number(it.unit_price_toman) > 0 || String(it.description || '').trim();
+        }).map(function(it){
+          return { service_id: it.service_id, quantity: Number(it.quantity || 1), unit_price_toman: Number(it.unit_price_toman || 0), description: it.description || '' };
+        })
+      };
+    }
+
+    function validate(p){
+      if (!p.invoice_date) return 'تاریخ فاکتور را انتخاب کنید.';
+      if (!p.customer_id) return 'انتخاب مشتری الزامی است.';
+      if (!p.items.length) return 'حداقل یک خدمت به فاکتور اضافه کنید.';
+      for (var i = 0; i < p.items.length; i++) {
+        var it = p.items[i];
+        if (!it.service_id) return 'ردیف ' + (i + 1) + ': خدمت را انتخاب کنید.';
+        if (!(it.quantity > 0)) return 'ردیف ' + (i + 1) + ': تعداد باید بزرگ‌تر از صفر باشد.';
+        if (!(it.unit_price_toman >= 0)) return 'ردیف ' + (i + 1) + ': مبلغ واحد نامعتبر است.';
+      }
+      return '';
+    }
+    showModal(formHtml(), function(close){
+      var listEl = $('#invItems');
+      var modalEl = listEl.closest ? listEl.closest('.modal') : null;
+      if (modalEl) modalEl.classList.add('modal-wide');
+      var modeSel = $('#iv_disc_mode');
+      var valInput = $('#iv_disc_value');
+      modeSel.value = discMode;
+      if (discValue > 0) valInput.value = discValue;
+
+      function paintItems(){ listEl.innerHTML = items.map(itemRow).join(''); }
+
+      function showAlert(kind, msg){
+        var box = $('#ivAlert');
+        box.innerHTML = msg ? '<div class="alert ' + kind + '">' + esc(msg) + '</div>' : '';
+        if (msg) { try { box.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+      }
+
+      function paintTotals(){
+        var sub = localSubtotal();
+        var disc = discountAmount(sub);
+        for (var i = 0; i < items.length; i++) {
+          var cell = listEl.querySelector('[data-line="' + i + '"]');
+          if (cell) cell.textContent = fmtMoney(lineGross(items[i]));
+        }
+        $('#sumSub').textContent = fmtMoney(sub);
+        $('#sumDisc').textContent = fmtMoney(disc);
+        var pending = disc > 0;
+        $('#sumTotalLabel').textContent = pending ? 'مبلغ نهایی قابل پرداخت (پیش از تأیید تخفیف)' : 'مبلغ نهایی قابل پرداخت';
+        $('#sumTotal').textContent = fmtMoney(sub);
+        $('#sumNote').textContent = pending
+          ? 'تخفیف ' + fmtMoney(disc) + ' پس از تأیید مدیر از مبلغ فاکتور کسر می‌شود.'
+          : '';
+      }
+
+      function requestPreview(){
+        var payload = buildPayload();
+        if (!payload.items.length) { return; }
+        var mySeq = ++previewSeq;
+        api('invoices.preview', { items: payload.items, discount_requested_toman: 0 }).then(function(p){
+          if (mySeq !== previewSeq || !p) return;
+          if (p.tax_enabled) {
+            $('#sumTaxRow').removeAttribute('hidden');
+            $('#sumTaxRate').textContent = '(' + fmtNum(p.tax_rate) + '٪)';
+            $('#sumTax').textContent = fmtMoney(p.tax_toman);
+          } else {
+            $('#sumTaxRow').setAttribute('hidden', 'hidden');
+          }
+          $('#sumTotal').textContent = fmtMoney(p.total_toman);
+        }).catch(function(){ /* keep the local estimate */ });
+      }
+
+      function schedulePreview(){
+        if (previewTimer) clearTimeout(previewTimer);
+        previewTimer = setTimeout(requestPreview, 300);
+      }
+
+      function readRow(el){
+        var i = Number(el.getAttribute('data-i'));
+        var k = el.getAttribute('data-k');
+        if (isNaN(i) || !k || !items[i]) return null;
+        return { i: i, k: k };
+      }
+
+      listEl.addEventListener('input', function(e){
+        var r = readRow(e.target);
+        if (!r) return;
+        if (r.k === 'quantity') items[r.i].quantity = Math.max(1, Number(e.target.value || 1));
+        else if (r.k === 'unit_price_toman') items[r.i].unit_price_toman = Math.max(0, Number(e.target.value || 0));
+        else if (r.k === 'description') items[r.i].description = e.target.value;
+        else return;
+        paintTotals();
+        schedulePreview();
+      });
+
+      listEl.addEventListener('change', function(e){
+        var r = readRow(e.target);
+        if (!r || r.k !== 'service_id') return;
+        items[r.i].service_id = e.target.value;
+        var svc = svcById(e.target.value);
+        var nameEl = listEl.querySelector('[data-name="' + r.i + '"]');
+        if (svc) {
+          if (nameEl) { nameEl.textContent = svc.name; nameEl.classList.remove('muted'); }
+          if (!Number(items[r.i].unit_price_toman)) {
+            items[r.i].unit_price_toman = Number(svc.base_price_toman || 0);
+            var priceEl = listEl.querySelector('input[data-i="' + r.i + '"][data-k="unit_price_toman"]');
+            if (priceEl) priceEl.value = items[r.i].unit_price_toman;
+          }
+        } else if (nameEl) {
+          nameEl.textContent = 'خدمتی انتخاب نشده';
+          nameEl.classList.add('muted');
+        }
+        paintTotals();
+        schedulePreview();
+      });
+
+      listEl.addEventListener('click', function(e){
+        var btn = e.target.closest ? e.target.closest('[data-del]') : null;
+        if (!btn) return;
+        var i = Number(btn.getAttribute('data-del'));
+        if (isNaN(i)) return;
+        if (items.length <= 1) items[0] = { service_id:'', quantity:1, unit_price_toman:0, description:'' };
+        else items.splice(i, 1);
+        paintItems();
+        paintTotals();
+        schedulePreview();
+        showAlert('', '');
+      });
+
+      modeSel.onchange = function(){
+        discMode = this.value;
+        if (discMode === 'percent' && discValue > 100) discValue = 100;
+        if (discMode === 'amount' && discValue > 0) discValue = Math.min(discValue, localSubtotal());
+        valInput.value = discValue || '';
+        paintTotals();
+      };
+      valInput.oninput = function(){
+        discValue = Math.max(0, Number(this.value || 0));
+        if (discMode === 'percent') discValue = Math.min(100, discValue);
+        paintTotals();
+      };
+      $('#addItem').onclick = function(){
+        items.push({ service_id:'', quantity:1, unit_price_toman:0, description:'' });
+        paintItems();
+        paintTotals();
+        var lastSel = listEl.querySelector('.item-row:last-child select');
+        if (lastSel) lastSel.focus();
+      };
+
+      if (canCreateCustomer) {
+        var ncToggle = $('#iv_new_cust_toggle');
+        var ncPanel = $('#iv_new_cust');
+        if (ncToggle && ncPanel) ncToggle.onclick = function(){
+          var hidden = ncPanel.hasAttribute('hidden');
+          if (hidden) ncPanel.removeAttribute('hidden'); else ncPanel.setAttribute('hidden', 'hidden');
+          if (hidden) { var nf = $('#iv_nc_name'); if (nf) nf.focus(); }
+        };
+        var ncSave = $('#iv_nc_save');
+        if (ncSave) ncSave.onclick = function(){
+          var name = ($('#iv_nc_name').value || '').trim();
+          if (!name) { showAlert('error', 'نام کامل مشتری الزامی است.'); return; }
+          ncSave.disabled = true; ncSave.textContent = 'در حال ثبت…';
+          api('customers.create', { full_name: name, mobile: $('#iv_nc_mobile').value, phone: $('#iv_nc_phone').value }).then(function(created){
+            var c = created || {};
+            customers.push({ id: c.id, full_name: c.full_name || name });
+            var sel = $('#iv_cust');
+            var opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.full_name || name;
+            sel.appendChild(opt);
+            sel.value = c.id;
+            ncPanel.setAttribute('hidden', 'hidden');
+            $('#iv_nc_name').value = ''; $('#iv_nc_mobile').value = ''; $('#iv_nc_phone').value = '';
+            ncSave.disabled = false; ncSave.textContent = 'ثبت و اتصال به فاکتور';
+            showAlert('success', 'مشتری «' + (c.full_name || name) + '» ثبت و به این فاکتور متصل شد.');
+            toast('مشتری جدید ثبت شد', 'success');
+          }).catch(function(e){
+            ncSave.disabled = false; ncSave.textContent = 'ثبت و اتصال به فاکتور';
+            showAlert('error', e.message || 'خطا در ثبت مشتری');
+          });
+        };
+      }
+
+      $('#cnInv').onclick = function(){ close(); };
+
+      $('#saveInv').onclick = function(){
+        var payload = buildPayload();
+        var err = validate(payload);
+        if (err) { showAlert('error', err); toast(err, 'error'); return; }
+        var btn = $('#saveInv');
+        btn.disabled = true;
+        $('#saveHint').textContent = 'در حال ذخیره…';
+        api('invoices.saveDraft', payload).then(function(){
+          toast('فاکتور با موفقیت ذخیره شد', 'success');
+          close();
+          loadRoute('invoices');
+        }).catch(function(e){
+          btn.disabled = false;
+          $('#saveHint').textContent = '';
+          showAlert('error', e.message || 'خطا در ذخیره فاکتور');
+        });
+      };
+
+      paintItems();
+      paintTotals();
+      if (!row.id) {
+        var firstSel = listEl.querySelector('select');
+        if (firstSel) firstSel.focus();
+      }
+    });
+
+
+
+  }
+
+/* ------------------------------------------------------ invoice documents --
+     One shared printable document for چاپ / PDF / پیش‌نمایش: formal A4 sheet with
+     the brand mark, invoice meta, item table, totals and payments. Rows never
+     break across pages (page-break-inside: avoid). ---------------------------- */
+  var INVOICE_PRINT_CSS = [
+    '@page{size:A4;margin:14mm 12mm}',
+    '*{box-sizing:border-box}',
+    'html,body{margin:0;padding:0;background:#fff;color:#12201E;font-size:12px;',
+    "font-family:'Vazirmatn','Segoe UI',Tahoma,sans-serif}",
+    '.sheet{width:186mm;margin:0 auto;padding:2mm 0}',
+    '.brand{display:flex;align-items:center;gap:12px;border-bottom:2px solid #C9A227;padding-bottom:10px}',
+    '.brand-mark{width:64px;height:64px;flex:0 0 64px}',
+    '.brand-mark svg{width:64px;height:64px}',
+    '.brand-text{flex:1 1 auto}',
+    '.brand-name{font-size:20px;font-weight:800;color:#0B3D3A;letter-spacing:.4px}',
+    '.brand-sub{font-size:11px;color:#5b6b68;margin-top:2px}',
+    '.brand-meta{font-size:11px;line-height:1.9;text-align:left;min-width:190px}',
+    '.doc-type{font-weight:800;color:#0B3D3A;font-size:13px}',
+    '.meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 18px;margin:12px 0 10px;',
+    'padding:8px 10px;border:1px solid #d8dfdc;border-radius:8px;background:#f8faf9}',
+    '.meta .k{display:inline-block;min-width:58px;color:#5b6b68}',
+    '.meta .v{font-weight:700}',
+    'table{width:100%;border-collapse:collapse}',
+    '.items{margin-top:8px}',
+    '.items th{background:#0B3D3A;color:#fff;font-weight:700;padding:7px 8px;font-size:11px;border:1px solid #0B3D3A}',
+    '.items td{border:1px solid #d8dfdc;padding:7px 8px;vertical-align:top}',
+    '.items tbody tr{page-break-inside:avoid;break-inside:avoid}',
+    '.items tbody tr:nth-child(even) td{background:#f6f8f7}',
+    '.n{text-align:center;font-variant-numeric:tabular-nums;direction:ltr}',
+    '.c{text-align:right}',
+    '.strong{font-weight:800}',
+    '.ltr{unicode-bidi:isolate;direction:ltr;text-align:center;font-variant-numeric:tabular-nums}',
+    '.totals{margin-top:10px;margin-inline-start:auto;width:78mm;page-break-inside:avoid}',
+    '.t-row{display:flex;justify-content:space-between;gap:10px;padding:5px 9px;border-bottom:1px dashed #dfe5e2}',
+    '.t-row span{color:#4b5b58}',
+    '.t-row b{font-variant-numeric:tabular-nums}',
+    '.t-row.grand{border:1px solid #C9A227;background:#fdf8e7;border-radius:6px;margin-top:6px;font-weight:800}',
+    '.pays{margin-top:14px;page-break-inside:avoid}',
+    '.pays h4{margin:0 0 6px;font-size:12px;color:#0B3D3A}',
+    '.pays th{background:#eef2f0;border:1px solid #d8dfdc;padding:6px;font-size:11px}',
+    '.pays td{border:1px solid #d8dfdc;padding:6px}',
+    '.void-note{margin-top:12px;padding:8px 10px;border:1px solid #b23b2e;background:#fdecea;color:#8c2a20;border-radius:6px;font-weight:700}',
+    '.foot{display:flex;justify-content:space-between;margin-top:16px;padding-top:8px;border-top:1px solid #dfe5e2;color:#6b7a77;font-size:10px}'
+  ].join('');
+
+  function buildInvoiceDocument(inv, items, pays, names){
+    names = names || {};
+    var logo = (typeof WRC_LOGO_MARK_HTML === 'string' ? WRC_LOGO_MARK_HTML : '');
+    var ver = ((document.querySelector('.js-app-version') || {}).textContent || '0.4.3').trim();
+    // Closing tags are assembled from parts on purpose: the preview/desktop
+    // harness injects its shim by replacing the closing body tag of the page,
+    // so that literal sequence must never appear inside an inline script.
+    var DOC_END = '</bo' + 'dy></ht' + 'ml>';
+    var itRows = (items || []).map(function(it){
+      return '<tr>' +
+        '<td class="c">' + esc(it.service_name_snapshot || it.description || '—') + '</td>' +
+        '<td class="n">' + fmtNum(it.quantity) + '</td>' +
+        '<td class="n">' + fmtMoney(it.unit_price_toman) + '</td>' +
+        '<td class="n">' + fmtMoney(it.line_discount_alloc_toman) + '</td>' +
+        '<td class="n">' + fmtMoney(it.line_tax_toman) + '</td>' +
+        '<td class="n strong">' + fmtMoney(it.line_total_toman) + '</td>' +
+      '</tr>';
+    }).join('');
+    var payRows = (pays || []).map(function(p){
+      return '<tr><td class="n">' + esc(p.payment_date || '') + '</td>' +
+        '<td class="n">' + fmtMoney(p.amount_toman) + '</td>' +
+        '<td class="c">' + esc(paymentMethodLabel(p.method)) + '</td>' +
+        '<td class="ltr">' + esc(p.reference_no || '—') + '</td></tr>';
+    }).join('');
+    return '<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">' +
+      '<title>فاکتور ' + esc(inv.invoice_no || inv.id) + '</title><style>' + INVOICE_PRINT_CSS + '</style></head><body>' +
+      '<div class="sheet">' +
+        '<header class="brand">' +
+          '<div class="brand-mark">' + logo + '</div>' +
+          '<div class="brand-text"><div class="brand-name">White Rose Clinic</div>' +
+            '<div class="brand-sub">کلینیک زیبایی رز سفید — فاکتور رسمی خدمات</div></div>' +
+          '<div class="brand-meta"><div class="doc-type">فاکتور فروش خدمات</div>' +
+            '<div>شماره: <b class="ltr">' + esc(inv.invoice_no || '—') + '</b></div>' +
+            '<div>تاریخ: <b>' + esc(faDate(inv.invoice_date)) + '</b></div>' +
+            '<div>وضعیت: <b>' + esc(invoiceStatusLabel(inv.status)) + '</b></div></div>' +
+        '</header>' +
+        '<section class="meta">' +
+          '<div><span class="k">مشتری</span><span class="v">' + esc(names.customer || '—') + '</span></div>' +
+          '<div><span class="k">موبایل</span><span class="v ltr">' + esc(names.customerMobile || '—') + '</span></div>' +
+          '<div><span class="k">پزشک</span><span class="v">' + esc(names.doctor || '—') + '</span></div>' +
+          '<div><span class="k">اپراتور</span><span class="v">' + esc(names.operator || '—') + '</span></div>' +
+        '</section>' +
+        '<table class="items"><thead><tr><th>شرح خدمت</th><th class="n">تعداد</th><th class="n">مبلغ واحد</th>' +
+          '<th class="n">سهم تخفیف</th><th class="n">مالیات</th><th class="n">مبلغ کل</th></tr></thead>' +
+          '<tbody>' + itRows + '</tbody></table>' +
+        '<section class="totals">' +
+          '<div class="t-row"><span>جمع خدمات</span><b>' + fmtMoney(inv.subtotal_toman) + '</b></div>' +
+          '<div class="t-row"><span>تخفیف</span><b>' + fmtMoney(inv.discount_toman) + '</b></div>' +
+          '<div class="t-row"><span>مالیات</span><b>' + fmtMoney(inv.tax_toman) + '</b></div>' +
+          '<div class="t-row grand"><span>مبلغ نهایی قابل پرداخت</span><b>' + fmtMoney(inv.total_toman) + '</b></div>' +
+          '<div class="t-row"><span>پرداخت‌شده</span><b>' + fmtMoney(inv.paid_toman) + '</b></div>' +
+          '<div class="t-row"><span>مانده</span><b>' + fmtMoney(inv.balance_toman) + '</b></div>' +
+        '</section>' +
+        (payRows ? '<section class="pays"><h4>پرداخت‌ها</h4><table><thead><tr><th>تاریخ</th><th>مبلغ</th><th>روش</th><th>مرجع</th></tr></thead><tbody>' + payRows + '</tbody></table></section>' : '') +
+        (inv.status === 'void' ? '<div class="void-note">این فاکتور ابطال شده است' + (inv.void_reason ? ' — علت: ' + esc(inv.void_reason) : '') + '</div>' : '') +
+        '<footer class="foot"><div>این سند به‌صورت سیستمی توسط سامانه White Rose Clinic صادر شده است.</div>' +
+          '<div class="ltr">v' + esc(ver) + '</div></footer>' +
+      '</div>' + DOC_END;
+  }
+
+  function printInvoiceDocument(html){
+    var frame = document.createElement('iframe');
+    frame.setAttribute('aria-hidden', 'true');
+    frame.style.cssText = 'position:fixed;inset:0;width:0;height:0;border:0;opacity:0;pointer-events:none';
+    document.body.appendChild(frame);
+    var doc = frame.contentWindow.document;
+    doc.open(); doc.write(html); doc.close();
+    setTimeout(function(){
+      try { frame.contentWindow.focus(); frame.contentWindow.print(); }
+      catch (e) { toast('چاپ ممکن نشد', 'error'); }
+      setTimeout(function(){ try { document.body.removeChild(frame); } catch (e) {} }, 60000);
+    }, 350);
+  }
+
+  function previewInvoiceDocument(html, title){
+    var inner = html.replace(/^[\s\S]*<body[^>]*>/i, '').replace(/<\/body>[\s\S]*$/i, '');
+    showModal('<h3>' + esc(title || 'پیش‌نمایش فاکتور') + '</h3>' +
+      '<div class="print-preview"><style>' + INVOICE_PRINT_CSS + '</style>' + inner + '</div>' +
+      '<div class="row"><button type="button" class="btn gold" id="ppPrint">چاپ / ذخیره PDF</button>' +
+      '<button type="button" class="btn secondary" id="ppClose">بستن</button></div>', function(close){
+      var modal = document.querySelector('.modal');
+      if (modal) modal.classList.add('modal-wide');
+      $('#ppClose').onclick = close;
+      $('#ppPrint').onclick = function(){ printInvoiceDocument(html); };
+    });
+  }
+
+
+  function paymentMethodLabel(m){
+    var map = { cash: 'نقدی', card: 'کارتخوان', transfer: 'حواله / کارت به کارت', online: 'آنلاین' };
+    return map[String(m || '')] || (m || '—');
+  }
+
+  function invoiceStatusLabel(s){
+    var map = {
+      draft: 'پیش‌نویس', pending_discount_approval: 'در انتظار تأیید تخفیف',
+      issued: 'صادرشده', partially_paid: 'پرداخت جزئی', paid: 'پرداخت‌شده', void: 'باطل‌شده'
+    };
+    return map[String(s || '')] || String(s || '');
+  }
+
+  function openInvoiceDetail(id, customers, doctors, services, operators){
+    api('invoices.get',{id:id}).then(function(data){
+      var inv=data.invoice, items=data.items||[], pays=data.payments||[];
+      var isAdmin = state.user.role==='admin';
+      var canOp = state.user.role==='admin' || state.user.role==='operator';
+      var actions = '';
+      if(canOp && ['draft','pending_discount_approval'].indexOf(inv.status)>=0) actions += '<button class="btn sm" id="actIssue">صدور فاکتور</button> ';
+      if(isAdmin && String(inv.discount_status)==='requested') actions += '<button class="btn sm gold" id="actApproveDisc">تأیید تخفیف</button> <button class="btn sm danger" id="actRejectDisc">رد تخفیف</button> ';
+      if(canOp && ['issued','partially_paid'].indexOf(inv.status)>=0) actions += '<button class="btn sm" id="actPay">ثبت پرداخت</button> ';
+      if(isAdmin && inv.status!=='void') actions += '<button class="btn sm danger" id="actVoid">ابطال فاکتور</button> ';
+      var printActions = '<button class="btn secondary sm" id="actPrint">چاپ فاکتور</button> ' +
+        '<button class="btn secondary sm" id="actPdf">خروجی PDF</button> ' +
+        '<button class="btn secondary sm" id="actPreview">پیش‌نمایش چاپ</button> ';
+      var nameOf = function(list, key, id2){ var x=(list||[]).filter(function(o){ return String(o.id)===String(id2); })[0]; return x ? x[key] : ''; };
+      var names = {
+        customer: nameOf(customers, 'full_name', inv.customer_id),
+        customerMobile: nameOf(customers, 'mobile', inv.customer_id),
+        doctor: nameOf(doctors, 'full_name', inv.doctor_id),
+        operator: nameOf(operators, 'full_name', inv.operator_id)
+      };
+      var html = '<h3>فاکتور '+esc(inv.invoice_no||inv.id)+'</h3><div class="row small muted"><div>وضعیت: '+statusBadge(inv.status)+'</div><div>تخفیف: '+statusBadge(inv.discount_status||'none')+'</div></div><hr class="sep">'+
+        '<div class="form-grid"><div><label>تاریخ</label><div>'+esc(inv.invoice_date)+'</div></div><div><label>مشتری</label><div>'+esc(names.customer||'—')+'</div></div><div><label>پزشک</label><div>'+esc(names.doctor||'—')+'</div></div><div><label>اپراتور</label><div>'+esc(names.operator||'—')+'</div></div><div><label>جمع جزء</label><div>'+fmtMoney(inv.subtotal_toman)+'</div></div><div><label>تخفیف</label><div>'+fmtMoney(inv.discount_toman)+'</div></div><div><label>مالیات</label><div>'+fmtMoney(inv.tax_toman)+'</div></div><div><label>مبلغ کل</label><div><b>'+fmtMoney(inv.total_toman)+'</b></div></div><div><label>پرداخت‌شده/مانده</label><div>'+fmtMoney(inv.paid_toman)+' / '+fmtMoney(inv.balance_toman)+'</div></div></div>'+
+        '<h4>آیتم‌ها</h4><div class="table-wrap"><table><thead><tr><th>خدمت</th><th>تعداد</th><th>مبلغ واحد</th><th>ناخالص</th><th>سهم تخفیف</th><th>مالیات</th><th>مبلغ خط</th></tr></thead><tbody>'+items.map(function(it){return '<tr><td>'+esc(it.service_name_snapshot||it.description||it.service_id)+'</td><td>'+esc(it.quantity)+'</td><td>'+fmtMoney(it.unit_price_toman)+'</td><td>'+fmtMoney(it.line_gross_toman)+'</td><td>'+fmtMoney(it.line_discount_alloc_toman)+'</td><td>'+fmtMoney(it.line_tax_toman)+'</td><td>'+fmtMoney(it.line_total_toman)+'</td></tr>';}).join('')+'</tbody></table></div>'+
+        '<h4>پرداخت‌ها</h4><div class="table-wrap"><table><thead><tr><th>تاریخ</th><th>مبلغ</th><th>روش</th><th>مرجع</th></tr></thead><tbody>'+pays.map(function(p){return '<tr><td>'+esc(p.payment_date)+'</td><td>'+fmtMoney(p.amount_toman)+'</td><td>'+esc(p.method)+'</td><td>'+esc(p.reference_no)+'</td></tr>';}).join('')+'</tbody></table></div>'+
+        '<div class="row" style="margin-top:12px">'+printActions+'</div>' +
+        '<div class="row" style="margin-top:8px">'+actions+'<button class="btn secondary sm" id="actClose">بستن</button></div>';
+      showModal(html, function(close){
+        $('#actClose').onclick=close;
+        var doc = function(){ return buildInvoiceDocument(inv, items, pays, names); };
+        if ($('#actPrint')) $('#actPrint').onclick = function(){ printInvoiceDocument(doc()); };
+        if ($('#actPdf')) $('#actPdf').onclick = function(){ printInvoiceDocument(doc()); };
+        if ($('#actPreview')) $('#actPreview').onclick = function(){ previewInvoiceDocument(doc()); };
+        if($('#actIssue')) $('#actIssue').onclick=function(){ api('invoices.issue',{id:inv.id}).then(function(){toast('فاکتور صادر شد و پورسانت محاسبه شد','success'); close(); loadRoute('invoices');}).catch(function(e){toast(e.message||'خطا','error');}); };
+        if($('#actApproveDisc')) $('#actApproveDisc').onclick=function(){
+          promptModal({
+            title:'تأیید تخفیف', message:'مبلغ تخفیف تأییدشده را وارد کنید.',
+            fields:[{key:'amount', label:'مبلغ تخفیف (تومان)', type:'number', value:inv.discount_requested_toman||0, required:true, full:true}],
+            submitLabel:'تأیید تخفیف',
+            validate:function(v){ return Number(v.amount) > Number(inv.subtotal_toman) ? 'مبلغ تخفیف از جمع خدمات بیشتر است.' : ''; },
+            onSubmit:function(v, done){
+              api('invoices.approveDiscount',{id:inv.id,approve:true,discount_approved_toman:Number(v.amount)})
+                .then(function(){ toast('تخفیف تأیید شد','success'); done(); close(); loadRoute('invoices'); })
+                .catch(function(e){ toast(e.message||'خطا','error'); });
+            }
+          });
+        };
+        if($('#actRejectDisc')) $('#actRejectDisc').onclick=function(){
+          promptModal({
+            title:'رد تخفیف', tone:'warn', message:'دلیل رد درخواست تخفیف را وارد کنید.',
+            fields:[{key:'reason', label:'دلیل رد', type:'textarea', required:true, full:true}],
+            submitLabel:'رد تخفیف',
+            onSubmit:function(v, done){
+              api('invoices.approveDiscount',{id:inv.id,approve:false,reason:v.reason})
+                .then(function(){ toast('تخفیف رد شد','success'); done(); close(); loadRoute('invoices'); })
+                .catch(function(e){ toast(e.message||'خطا','error'); });
+            }
+          });
+        };
+        if($('#actPay')) $('#actPay').onclick=function(){
+          promptModal({
+            title:'ثبت پرداخت', message:'مبلغ دریافتی و روش پرداخت را ثبت کنید.',
+            fields:[
+              {key:'amount', label:'مبلغ (تومان)', type:'number', value:inv.balance_toman||0, required:true},
+              {key:'date', label:'تاریخ پرداخت', type:'date', value:todayIso()},
+              {key:'method', label:'روش پرداخت', type:'select', value:'cash', options:[['cash','نقدی'],['card','کارتخوان'],['transfer','حواله / کارت به کارت'],['online','آنلاین']]},
+              {key:'ref', label:'شماره مرجع (اختیاری)'}
+            ],
+            submitLabel:'ثبت پرداخت',
+            validate:function(v){ return Number(v.amount) > 0 ? '' : 'مبلغ باید بزرگ‌تر از صفر باشد.'; },
+            onSubmit:function(v, done){
+              api('payments.add',{invoice_id:inv.id,amount_toman:Number(v.amount),payment_date:v.date||todayIso(),method:v.method||'cash',reference_no:v.ref||''})
+                .then(function(){ toast('پرداخت ثبت شد','success'); done(); close(); loadRoute('invoices'); })
+                .catch(function(e){ toast(e.message||'خطا','error'); });
+            }
+          });
+        };
+        if($('#actVoid')) $('#actVoid').onclick=function(){
+          promptModal({
+            title:'ابطال فاکتور', tone:'danger',
+            message:'ابطال فاکتور قابل بازگشت نیست و پورسانت‌های مربوط لغو می‌شوند؛ سابقهٔ فاکتور در گزارش‌ها باقی می‌ماند.',
+            fields:[{key:'reason', label:'علت ابطال', type:'textarea', required:true, full:true, help:'حداقل ۳ حرف — در Audit Log ثبت می‌شود.'}],
+            submitLabel:'ابطال فاکتور',
+            validate:function(v){ return String(v.reason||'').trim().length >= 3 ? '' : 'علت ابطال الزامی است.'; },
+            onSubmit:function(v, done){
+              api('invoices.void',{id:inv.id,reason:v.reason})
+                .then(function(){ toast('فاکتور باطل شد','success'); done(); close(); loadRoute('invoices'); })
+                .catch(function(e){ toast(e.message||'خطا','error'); });
+            }
+          });
+        };
+      });
+    }).catch(function(e){ toast(e.message||'خطا','error'); });
+  }
+
+  /* ---------------------------------------------------------- design system --
+     One modal implementation for every prompt/confirm in the app, so no native
+     window.alert/prompt dialog with the OS look is ever shown. ---------------- */
+  function promptModal(opts){
+    opts = opts || {};
+    var fields = opts.fields || [];
+    var idOf = function(k){ return 'pm_' + k; };
+    var html = '<h3>' + esc(opts.title || '') + '</h3>' +
+      (opts.message ? '<div class="alert ' + (opts.tone || 'info') + '">' + esc(opts.message) + '</div>' : '') +
+      '<div id="pmAlert" role="alert"></div>' +
+      '<div class="form-grid">' + fields.map(function(f){
+        var input;
+        if (f.type === 'select') {
+          input = '<select id="' + idOf(f.key) + '" data-pm-key="' + esc(f.key) + '">' +
+            (f.options || []).map(function(o){
+              var val = String(o[0]), label = o[1];
+              return '<option value="' + esc(val) + '"' + (String(f.value) === val ? ' selected' : '') + '>' + esc(label) + '</option>';
+            }).join('') + '</select>';
+        } else if (f.type === 'textarea') {
+          input = '<textarea id="' + idOf(f.key) + '" data-pm-key="' + esc(f.key) + '" placeholder="' + esc(f.placeholder || '') + '">' + esc(f.value || '') + '</textarea>';
+        } else {
+          input = '<input id="' + idOf(f.key) + '" data-pm-key="' + esc(f.key) + '" type="' + (f.type || 'text') + '"' +
+            (f.type === 'number' ? ' inputmode="numeric" min="' + (f.min === undefined ? 0 : f.min) + '" step="' + (f.step || 1) + '"' : '') +
+            ' dir="' + (f.dir || (f.type === 'number' || f.type === 'date' ? 'ltr' : 'auto')) + '"' +
+            ' value="' + esc(f.value === undefined || f.value === null ? '' : f.value) + '"' +
+            ' placeholder="' + esc(f.placeholder || '') + '">';
+        }
+        return '<div class="form-group' + (f.full ? ' form-span' : '') + '"><label for="' + idOf(f.key) + '">' + esc(f.label) +
+          (f.required ? ' <span class="req">*</span>' : '') + '</label>' + input +
+          (f.help ? '<div class="help">' + esc(f.help) + '</div>' : '') + '</div>';
+      }).join('') + '</div>' +
+      '<div class="row" style="margin-top:var(--sp-3)">' +
+        '<button type="button" class="btn ' + (opts.tone === 'danger' ? 'danger' : 'gold') + '" id="pmOk">' + esc(opts.submitLabel || 'تأیید') + '</button>' +
+        '<button type="button" class="btn secondary" id="pmCancel">انصراف</button>' +
+      '</div>';
+
+    showModal(html, function(close){
+      var okBtn = $('#pmOk'), cancelBtn = $('#pmCancel');
+      if (cancelBtn) cancelBtn.onclick = close;
+      var first = document.querySelector('[data-pm-key]');
+      if (first) try { first.focus(); } catch (e) {}
+      if (okBtn) okBtn.onclick = function(){
+        var values = {};
+        $all('[data-pm-key]').forEach(function(el){ values[el.getAttribute('data-pm-key')] = el.value; });
+        var msg = '';
+        fields.forEach(function(f){
+          if (f.required && !String(values[f.key] || '').trim()) msg = msg || (f.label + ' الزامی است.');
+        });
+        if (!msg && typeof opts.validate === 'function') msg = opts.validate(values) || '';
+        if (msg) { $('#pmAlert').innerHTML = '<div class="alert error">' + esc(msg) + '</div>'; return; }
+        okBtn.disabled = true;
+        try { opts.onSubmit(values, close); }
+        catch (e) { okBtn.disabled = false; $('#pmAlert').innerHTML = '<div class="alert error">' + esc(e.message || 'خطا') + '</div>'; }
+      };
+    });
+  }
+
+  function confirmModal(opts){
+    opts = opts || {};
+    showModal('<h3>' + esc(opts.title || 'تأیید') + '</h3>' +
+      '<div class="alert ' + (opts.tone || 'warn') + '">' + esc(opts.message || '') + '</div>' +
+      '<div class="row"><button type="button" class="btn ' + (opts.tone === 'danger' ? 'danger' : 'gold') + '" id="cfOk">' + esc(opts.confirmLabel || 'تأیید') + '</button>' +
+      '<button type="button" class="btn secondary" id="cfCancel">انصراف</button></div>', function(close){
+      $('#cfCancel').onclick = close;
+      $('#cfOk').onclick = function(){ close(); if (typeof opts.onConfirm === 'function') opts.onConfirm(); };
+    });
+  }
+
+  /* Only digits (Persian/Arabic digits are converted), a single leading +, and
+     the leading zero of Iranian numbers is preserved. */
+  function sanitizePhoneValue(v){
+    var fa = '۰۱۲۳۴۵۶۷۸۹', ar = '٠١٢٣٤٥٦٧٨٩', s = String(v == null ? '' : v), out = '';
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i), fi = fa.indexOf(ch), ai = ar.indexOf(ch);
+      out += fi >= 0 ? String(fi) : (ai >= 0 ? String(ai) : ch);
+    }
+    var plus = out.trim().charAt(0) === '+';
+    out = out.replace(/[^0-9]/g, '');
+    if (plus) out = '+' + out;
+    return out.slice(0, plus ? 15 : 11);
+  }
+  function bindPhoneInputs(root){
+    $all('[data-phone]', root || document).forEach(function(el){
+      el.addEventListener('input', function(){ var v = sanitizePhoneValue(el.value); if (el.value !== v) el.value = v; });
+      el.setAttribute('inputmode', 'numeric');
+    });
+  }
+  function phoneField(id, label, value, kind){
+    return '<div class="form-group"><label for="' + id + '">' + esc(label) + '</label>' +
+      '<input id="' + id + '" class="ltr-num" dir="ltr" data-phone data-phone-kind="' + (kind || 'mobile') + '"' +
+      ' value="' + esc(value || '') + '" placeholder="09121234567" maxlength="15" autocomplete="off"></div>';
+  }
+  function showModal(content, onBind){
+
+    var root = document.createElement('div');
+    root.className = 'modal-backdrop';
+    root.innerHTML = '<div class="modal" role="dialog" aria-modal="true">'+content+'</div>';
+    document.body.appendChild(root);
+    document.body.classList.add('modal-open');
+
+    function onKey(e){ if(e.key === 'Escape'){ close(); } }
+    function close(){
+      try{ document.body.removeChild(root); }catch(e){}
+      document.body.classList.remove('modal-open');
+      document.removeEventListener('keydown', onKey);
+    }
+
+    document.addEventListener('keydown', onKey);
+    root.addEventListener('click', function(e){ if(e.target===root) close(); });
+    try{
+      var first = root.querySelector('input,select,textarea');
+      if(first) first.focus();
+    }catch(e){}
+    onBind(close, root);
+  }
+
+  function boot(){
+    api('system.ping', {}).then(function(r){
+      if (r && r.app) applyVersion(r.app.VERSION);
+    }).catch(function(){}).then(function(){
+      if(state.token){
+        api('auth.me',{}).then(function(d){ state.user = d.user; render(); }).catch(function(){ setToken(''); state.user=null; render(); });
+      } else {
+        render();
+      }
+    });
+  }
+
+  boot();
+})();
+</script>
