@@ -27,7 +27,7 @@
 |---|---|
 | [`docs/architecture/SYSTEM_ARCHITECTURE.md`](docs/architecture/SYSTEM_ARCHITECTURE.md) | معماری کلان، استقرار، فازبندی |
 | [`docs/architecture/DOMAIN_MODEL.md`](docs/architecture/DOMAIN_MODEL.md) | ۲۲ ماژول دامنه + اصلاح فاکتور + اعتبار بیمار |
-| [`docs/architecture/DATABASE_DESIGN.md`](docs/architecture/DATABASE_DESIGN.md) | ۲۸ جدول، کلیدها، ایندکس‌ها، مبالغ |
+| [`docs/architecture/DATABASE_DESIGN.md`](docs/architecture/DATABASE_DESIGN.md) | ۳۱ جدول، کلیدها، ایندکس‌ها، مبالغ |
 | [`docs/architecture/API_DESIGN.md`](docs/architecture/API_DESIGN.md) | قرارداد `POST /api` + همهٔ اکشن‌ها |
 | [`docs/architecture/SECURITY_DESIGN.md`](docs/architecture/SECURITY_DESIGN.md) | نشست، RBAC، Audit، SQLCipher/DPAPI |
 | [`docs/architecture/OFFLINE_SYNC_DESIGN.md`](docs/architecture/OFFLINE_SYNC_DESIGN.md) | Outbox، تعارض، شمارهٔ موقت |
@@ -128,7 +128,7 @@ python -m pytest backend/tests -q
 ## قواعد امنیتی این مخزن
 
 - `SECRET_KEY` و رمزهای واقعی فقط در `.env` محلی (خارج از Git).
-- هیچ رمز پیش‌فرض/حساب مدیر Seed نمی‌شود؛ ساخت مدیر در فاز ۳ با wizard امن انجام می‌شود.
+- هیچ رمز پیش‌فرض/حساب مدیر Seed نمی‌شود؛ اولین حساب فقط با `python -m app.cli bootstrap-owner` روی سرور ساخته می‌شود (نه از API و نه با wizard/رمز ثابت).
 - لاگ‌ها هرگز توکن/رمز/هش را ثبت نمی‌کنند.
 - PostgreSQL عملیاتی فقط پس از اجازهٔ مدیر نصب/راه‌اندازی می‌شود.
 
