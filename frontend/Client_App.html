@@ -3,6 +3,7 @@
   var state = {
     token: sessionStorage.getItem('wrc_token') || '',
     user: null,
+    appVersion: window.WRC_APP_VERSION || '',
     route: 'dashboard',
     cache: {},
     loading: false,
@@ -98,6 +99,7 @@
   /* ---- version chip ---- */
   function applyVersion(v){
     if (v) state.appVersion = String(v);
+    if (!state.appVersion && window.WRC_APP_VERSION) state.appVersion = String(window.WRC_APP_VERSION);
     if (!state.appVersion) return;
     var label = 'v' + state.appVersion;
     $all('.js-app-version').forEach(function(el){ el.textContent = label; });
@@ -210,12 +212,29 @@
     return (typeof WRC_LOGO_MARK_HTML === 'string') ? WRC_LOGO_MARK_HTML : logoHtml();
   }
 
+  function hasPerm(code){
+    if(!state.user) return false;
+    var perms = state.user.permissions;
+    if(Array.isArray(perms)) return perms.indexOf(code) >= 0;
+    return state.user.role === 'admin';
+  }
+
   function api(action, payload){
     return new Promise(function(resolve, reject){
       google.script.run
         .withSuccessHandler(function(res){
           if(res && res.ok) resolve(res.data);
-          else reject(res && res.error ? res.error : {message:'خطای نامشخص'});
+          else {
+            var err = res && res.error ? res.error : {message:'خطای نامشخص'};
+            if(err.code === 'UNAUTHORIZED' || err.code === 'PASSWORD_CHANGE_REQUIRED'){
+              if(err.code === 'UNAUTHORIZED'){
+                setToken(''); state.user = null;
+                toast(err.message || 'نشست منقضی شده است. دوباره وارد شوید.', 'error');
+                setTimeout(function(){ render(); }, 120);
+              }
+            }
+            reject(err);
+          }
         })
         .withFailureHandler(function(err){
           reject({code:'CLIENT', message: (err && err.message) ? err.message : 'خطا در ارتباط با سرور'});
@@ -256,6 +275,10 @@
       {id:'expenses', title:'هزینه‌ها', roles:['admin','operator']}
     ]},
     {id:'reports', title:'گزارش‌ها', icon:'reports', roles:['admin']},
+    {id:'access', title:'دسترسی‌ها', icon:'users', roles:['admin'], children:[
+      {id:'roles', title:'نقش‌ها و مجوزها', roles:['admin']},
+      {id:'audit', title:'گزارش رویدادها', roles:['admin']}
+    ]},
     {id:'definitions', title:'تعاریف پایه', icon:'definitions', roles:['admin'], children:[
       {id:'doctors', title:'تعریف پزشک', roles:['admin']},
       {id:'operators', title:'تعریف اپراتور', roles:['admin']},
@@ -316,16 +339,10 @@
       '<div class="form-group"><label>نام کاربری</label><input id="loginUser" autocomplete="username"></div>'+
       '<div class="form-group"><label>رمز عبور</label><input id="loginPass" type="password" autocomplete="current-password"></div>'+
       '<div class="row"><button class="btn gold block" id="loginBtn">ورود به سامانه</button></div>'+
-      '<details class="setup-details"><summary>راه‌اندازی اولیه (فقط در صورت نبود مدیر فعال)</summary>'+
-      '<div class="form-group"><label>نام کاربری مدیر</label><input id="bootUser" autocomplete="off"></div>'+
-      '<div class="form-group"><label>رمز عبور مدیر</label><input id="bootPass" type="password" autocomplete="new-password"></div>'+
-      '<div class="form-group"><label>نام نمایشی</label><input id="bootName" value="مدیر سیستم"></div>'+
-      '<button class="btn secondary sm block" id="bootBtn">ایجاد مدیر اولیه</button>'+
-      '</details>'+
       '<div class="login-hint"><span>ورود با نام کاربری و رمز عبور</span><span class="js-app-version">—</span></div>'+
+      '<div class="muted small" style="margin-top:10px">راه‌اندازی اولیهٔ سیستم فقط توسط مالک از ابزار مدیریت سرور انجام می‌شود.</div>'+
       '</div></div>';
     $('#loginBtn').onclick = doLogin;
-    $('#bootBtn').onclick = doBootstrap;
     $('#loginPass').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ doLogin(); } });
     $('#loginUser').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ $('#loginPass').focus(); } });
   }
@@ -369,6 +386,7 @@
               '<span class="user-meta"><span class="user-name">'+esc(state.user.display_name||state.user.username)+'</span>'+
               '<span class="user-role">'+esc(roleLabel(state.user.role))+'</span></span></div>'+
             '<button class="btn secondary sm block" id="logoutBtn">خروج</button>'+
+            '<button class="btn secondary sm block" id="logoutAllBtn" style="margin-top:6px">خروج از همه دستگاه‌ها</button>'+
             '<div class="version-row"><span class="version-chip">نسخه <span class="js-app-version">—</span></span></div>'+
           '</div>'+
         '</aside>'+
@@ -407,6 +425,12 @@
     var refreshBtn = $('#refreshBtn');
     if (refreshBtn) refreshBtn.onclick = function(){ loadRoute(state.route); toast('به‌روزرسانی شد', 'success'); };
     $('#logoutBtn').onclick = doLogout;
+    var logoutAllBtn = $('#logoutAllBtn');
+    if (logoutAllBtn) logoutAllBtn.onclick = function(){
+      confirmModal({ title:'خروج از همه دستگاه‌ها', message:'تمام نشست‌های فعال این حساب بسته می‌شود و باید دوباره وارد شوید.', confirmLabel:'خروج از همه', onConfirm:function(){
+        api('auth.logout_all',{}).finally(function(){ setToken(''); state.user=null; render(); });
+      }});
+    };
     navigate(state.route || 'dashboard');
   }
 
@@ -441,16 +465,6 @@
     }).catch(function(err){ alert.innerHTML='<div class="alert error">'+esc(err.message||'خطا در ورود')+'</div>'; }).finally(function(){ var b=$('#loginBtn'); if(b) b.disabled=false; });
   }
 
-  function doBootstrap(){
-    var u=$('#bootUser').value.trim(), p=$('#bootPass').value, n=$('#bootName').value.trim();
-    var alert=$('#loginAlert');
-    if(!u||!p){ alert.innerHTML='<div class="alert error">اطلاعات مدیر اولیه ناقص است.</div>'; return; }
-    $('#bootBtn').disabled=true;
-    api('setup.bootstrapAdmin',{username:u,password:p,displayName:n||'مدیر سیستم'}).then(function(){
-      alert.innerHTML='<div class="alert success">مدیر اولیه ایجاد شد. اکنون وارد شوید.</div>';
-    }).catch(function(err){ alert.innerHTML='<div class="alert error">'+esc(err.message||'خطا')+'</div>'; }).finally(function(){ var b=$('#bootBtn'); if(b) b.disabled=false; });
-  }
-
   function renderChangePassword(forced){
     var app=$('#app');
     app.innerHTML='<div class="login-wrap"><div class="login-card"><div class="login-brand"><h1>تغییر رمز عبور</h1><p>'+ (forced?'تغییر رمز در اولین ورود الزامی است.':'') +'</p></div><div id="cpAlert"></div><div class="form-group"><label>رمز فعلی</label><input id="oldP" type="password"></div><div class="form-group"><label>رمز جدید</label><input id="newP" type="password"></div><button class="btn gold" id="cpBtn">ذخیره و ادامه</button></div></div>';
@@ -472,7 +486,7 @@
       dashboard: viewDashboard, customers: viewCustomers, doctors: viewDoctors, operators: viewOperators,
       services: viewServices, invoices: viewInvoices, expenses: viewExpenses, revenue: viewRevenue,
       commissions: viewCommissions, commissionRules: viewCommissionRules, reports: viewReports,
-      users: viewUsers, settings: viewSettings
+      users: viewUsers, roles: viewRoles, audit: viewAudit, settings: viewSettings
     }[routeId];
     if(!fn){ c.innerHTML='<div class="panel">صفحه یافت نشد.</div>'; return; }
     Promise.resolve().then(fn).catch(function(err){ c.innerHTML='<div class="panel"><div class="alert error">'+esc(err.message||'خطا در بارگذاری')+'</div></div>'; if(err && err.code==='UNAUTHORIZED'){ setToken(''); state.user=null; render(); } });
@@ -1828,9 +1842,422 @@
     onBind(close, root);
   }
 
+  /* ---------------- Phase 3: users, roles/permissions, audit views ---------- */
+  function roleNames(list){ return (list || []).map(function(r){ return r && r.name ? r.name : r; }).join('، '); }
+
+  function viewUsers(){
+    return Promise.all([
+      api('users.list', {}),
+      api('roles.list', {}).catch(function(){ return { roles: [] }; }),
+      api('doctors.list', {}).catch(function(){ return []; }),
+      api('operators.list', {}).catch(function(){ return []; })
+    ]).then(function(res){
+      var data = res[0] || {}, rows = data.rows || [];
+      var roles = (res[1] && res[1].roles) || [];
+      var doctors = res[2] || [], operators = res[3] || [];
+      var canManage = hasPerm('users.manage');
+      var body = rows.map(function(u){
+        var status = !u.is_active ? '<span class="badge">غیرفعال</span>'
+          : (u.locked ? '<span class="badge warn">قفل‌شده</span>' : '<span class="badge ok">فعال</span>');
+        var sess = u.active_sessions ? ' <span class="badge info">' + fmtNum(u.active_sessions) + ' نشست</span>' : '';
+        var acts = canManage ? '<div class="row" style="gap:6px;flex-wrap:wrap">' +
+          '<button class="btn secondary sm" data-uact="roles" data-uid="' + esc(u.id) + '">نقش‌ها</button>' +
+          '<button class="btn secondary sm" data-uact="sessions" data-uid="' + esc(u.id) + '">نشست‌ها</button>' +
+          '<button class="btn secondary sm" data-uact="activity" data-uid="' + esc(u.id) + '">فعالیت</button>' +
+          '<button class="btn secondary sm" data-uact="reset" data-uid="' + esc(u.id) + '">رمز</button>' +
+          (u.locked ? '<button class="btn secondary sm" data-uact="unlock" data-uid="' + esc(u.id) + '">بازکردن قفل</button>' : '') +
+          '<button class="btn ' + (u.is_active ? 'danger' : 'gold') + ' sm" data-uact="toggle" data-uid="' + esc(u.id) + '">' +
+            (u.is_active ? 'غیرفعال' : 'فعال') + '</button>' +
+          '</div>' : '<span class="muted small">—</span>';
+        return '<tr><td>' + esc(u.username) + '</td><td>' + esc(u.display_name) + '</td>' +
+          '<td>' + esc(roleNames(u.role_names || u.roles)) + '</td>' +
+          '<td>' + status + sess + '</td>' +
+          '<td class="ltr-num">' + esc(u.last_login_at || '') + '</td><td>' + acts + '</td></tr>';
+      }).join('');
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>کاربران</h2><div class="toolbar">' +
+        (canManage ? '<button class="btn gold sm" id="addUser">کاربر جدید</button>' : '') +
+        '<span class="muted small">' + fmtNum(rows.length) + ' کاربر</span></div></div>' +
+        '<div class="alert info">نقش‌ها و مجوزها از بخش «دسترسی‌ها» مدیریت می‌شوند. رمز عبور هرگز به‌صورت متن ذخیره نمی‌شود.</div>' +
+        '<div class="table-wrap"><table><thead><tr><th>نام کاربری</th><th>نام</th><th>نقش‌ها</th><th>وضعیت</th><th>آخرین ورود</th><th>عملیات</th></tr></thead><tbody>' +
+        (body || '<tr><td colspan="6" class="muted">کاربری ثبت نشده است.</td></tr>') +
+        '</tbody></table></div></div>';
+      if (!canManage) return;
+      $('#addUser').onclick = function(){ openUserCreate(roles, doctors, operators); };
+      $all('[data-uact]').forEach(function(btn){
+        btn.onclick = function(){
+          handleUserAction(btn.getAttribute('data-uact'), btn.getAttribute('data-uid'), rows, roles);
+        };
+      });
+    });
+  }
+
+  function roleChecks(roles, selected){
+    var html = '<div class="form-grid" id="roleChecks">' + roles.map(function(r){
+      var on = (selected || []).indexOf(r.code) >= 0;
+      return '<label style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
+        '<input type="checkbox" value="' + esc(r.code) + '"' + (on ? ' checked' : '') + '>' +
+        '<span>' + esc(r.name) + ' <span class="muted small">(' + esc(r.code) + ')</span></span></label>';
+    }).join('') + '</div>';
+    return html + (roles.length ? '' : '<div class="muted small">هنوز نقشی تعریف نشده است؛ ابتدا از بخش «دسترسی‌ها» نقش بسازید.</div>');
+  }
+
+  function selectedRoleCodes(){
+    return $all('#roleChecks input:checked').map(function(input){ return input.value; });
+  }
+
+  function openUserCreate(roles, doctors, operators){
+    var doctorOptions = '<option value="">-</option>' + (doctors || []).map(function(d){
+      return '<option value="' + esc(d.id) + '">' + esc(d.full_name) + '</option>';
+    }).join('');
+    var operatorOptions = '<option value="">-</option>' + (operators || []).map(function(o){
+      return '<option value="' + esc(o.id) + '">' + esc(o.full_name) + '</option>';
+    }).join('');
+    showModal('<h3>کاربر جدید</h3>' +
+      '<div class="alert info">رمز اولیه را به کاربر اطلاع دهید؛ در اولین ورود، تغییر رمز الزامی است.</div>' +
+      '<div class="form-grid">' +
+        '<div class="form-group"><label>نام کاربری</label><input id="nuUser" dir="ltr" autocomplete="off"></div>' +
+        '<div class="form-group"><label>رمز عبور</label><input id="nuPass" type="password" autocomplete="new-password"></div>' +
+        '<div class="form-group"><label>نام نمایشی</label><input id="nuName"></div>' +
+        '<div class="form-group"><label>نقش نمایشی منو</label><select id="nuLegacy">' +
+          '<option value="admin">مدیر</option><option value="operator" selected>اپراتور</option><option value="doctor">پزشک</option>' +
+        '</select></div>' +
+        '<div class="form-group"><label>پزشک مرتبط (برای نقش پزشک)</label><select id="nuDoctor">' + doctorOptions + '</select></div>' +
+        '<div class="form-group"><label>اپراتور مرتبط</label><select id="nuOperator">' + operatorOptions + '</select></div>' +
+      '</div>' +
+      '<div class="form-group"><label>نقش‌ها</label>' + roleChecks(roles, []) + '</div>' +
+      '<div class="row"><button class="btn gold" id="nuSave">ذخیره</button><button class="btn secondary" id="nuCancel">انصراف</button></div>',
+      function(close){
+        $('#nuCancel').onclick = close;
+        $('#nuSave').onclick = function(){
+          var codes = selectedRoleCodes();
+          if (!codes.length) { toast('حداقل یک نقش انتخاب کنید', 'error'); return; }
+          $('#nuSave').disabled = true;
+          api('users.create', {
+            username: ($('#nuUser').value || '').trim().toLowerCase(),
+            password: $('#nuPass').value,
+            display_name: ($('#nuName').value || '').trim(),
+            role_codes: codes,
+            linked_doctor_id: $('#nuDoctor').value || null,
+            linked_operator_id: $('#nuOperator').value || null,
+            must_change_password: true
+          }).then(function(){ toast('کاربر ایجاد شد', 'success'); close(); loadRoute('users'); })
+            .catch(function(e){ toast(e.message || 'خطا', 'error'); $('#nuSave').disabled = false; });
+        };
+      });
+  }
+
+  function handleUserAction(action, userId, rows, roles){
+    var user = (rows || []).filter(function(u){ return u.id === userId; })[0];
+    if (!user) return;
+    if (action === 'roles') {
+      showModal('<h3>نقش‌های ' + esc(user.username) + '</h3>' +
+        '<div class="muted small">مجوز مؤثر کاربر از اجتماع مجوزهای این نقش‌ها محاسبه می‌شود.</div>' +
+        '<div class="form-group" style="margin-top:10px">' + roleChecks(roles, user.roles || []) + '</div>' +
+        '<div class="row"><button class="btn gold" id="rSave">ذخیره</button><button class="btn secondary" id="rCancel">انصراف</button></div>',
+        function(close){
+          $('#rCancel').onclick = close;
+          $('#rSave').onclick = function(){
+            var current = user.roles || [];
+            var wanted = selectedRoleCodes();
+            if (!wanted.length) { toast('حداقل یک نقش لازم است', 'error'); return; }
+            var toAdd = wanted.filter(function(c){ return current.indexOf(c) < 0; });
+            var toRemove = current.filter(function(c){ return wanted.indexOf(c) < 0; });
+            var chain = Promise.resolve();
+            if (toAdd.length) chain = chain.then(function(){ return api('roles.assign', { user_id: user.id, role_codes: toAdd }); });
+            if (toRemove.length) chain = chain.then(function(){ return api('roles.revoke', { user_id: user.id, role_codes: toRemove }); });
+            $('#rSave').disabled = true;
+            chain.then(function(){ toast('نقش‌ها به‌روزرسانی شد', 'success'); close(); loadRoute('users'); })
+              .catch(function(e){ toast(e.message || 'خطا', 'error'); $('#rSave').disabled = false; });
+          };
+        });
+      return;
+    }
+    if (action === 'toggle') {
+      var disabling = !!user.is_active;
+      confirmModal({ title: disabling ? 'غیرفعال‌سازی کاربر' : 'فعال‌سازی کاربر',
+        tone: disabling ? 'danger' : 'info',
+        message: disabling ? 'با غیرفعال‌سازی، تمام نشست‌های کاربر بسته می‌شود.' : 'کاربر می‌تواند دوباره وارد شود.',
+        confirmLabel: disabling ? 'غیرفعال کن' : 'فعال کن',
+        onConfirm: function(){
+          api(disabling ? 'users.disable' : 'users.enable', { user_id: user.id })
+            .then(function(){ toast('وضعیت به‌روزرسانی شد', 'success'); loadRoute('users'); })
+            .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+        }});
+      return;
+    }
+    if (action === 'unlock') {
+      confirmModal({ title: 'بازکردن قفل حساب', message: 'شمارندهٔ تلاش‌های ناموفق و قفل حساب پاک می‌شود.', confirmLabel: 'باز کن',
+        onConfirm: function(){
+          api('users.unlock', { user_id: user.id })
+            .then(function(){ toast('حساب باز شد', 'success'); loadRoute('users'); })
+            .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+        }});
+      return;
+    }
+    if (action === 'reset') {
+      showModal('<h3>بازنشانی رمز ' + esc(user.username) + '</h3>' +
+        '<div class="alert warn">کاربر در ورود بعدی باید رمز را تغییر دهد و همهٔ نشست‌های فعلی بسته می‌شوند.</div>' +
+        '<div class="form-group"><label>رمز جدید</label><input id="rpPass" type="password" autocomplete="new-password"></div>' +
+        '<div class="row"><button class="btn gold" id="rpSave">ذخیره</button><button class="btn secondary" id="rpCancel">انصراف</button></div>',
+        function(close){
+          $('#rpCancel').onclick = close;
+          $('#rpSave').onclick = function(){
+            api('users.change_password', { user_id: user.id, new_password: $('#rpPass').value })
+              .then(function(){ toast('رمز بازنشانی شد', 'success'); close(); loadRoute('users'); })
+              .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+          };
+        });
+      return;
+    }
+    if (action === 'sessions') {
+      api('users.sessions', { user_id: user.id }).then(function(data){
+        var items = (data && data.sessions) || [];
+        var rowsHtml = items.map(function(s){
+          return '<tr><td class="ltr-num">' + esc(s.issued_at || '') + '</td><td class="ltr-num">' + esc(s.ip_address || '-') + '</td>' +
+            '<td class="ltr-num">' + esc(s.idle_expires_at || '') + '</td>' +
+            '<td><button class="btn secondary sm" data-srev="' + esc(s.id) + '">ابطال</button></td></tr>';
+        }).join('');
+        showModal('<h3>نشست‌های فعال ' + esc(user.username) + '</h3>' +
+          '<div class="table-wrap"><table><thead><tr><th>ورود</th><th>IP</th><th>انقضای بی‌کاری</th><th></th></tr></thead><tbody>' +
+          (rowsHtml || '<tr><td colspan="4" class="muted">نشست فعالی وجود ندارد.</td></tr>') + '</tbody></table></div>' +
+          '<div class="row" style="margin-top:10px"><button class="btn danger" id="sRevokeAll">ابطال همه</button>' +
+          '<button class="btn secondary" id="sClose">بستن</button></div>',
+          function(close){
+            $('#sClose').onclick = close;
+            $('#sRevokeAll').onclick = function(){
+              api('users.revoke_sessions', { user_id: user.id, reason: 'admin_revoke_all' })
+                .then(function(){ toast('همهٔ نشست‌ها بسته شد', 'success'); close(); loadRoute('users'); })
+                .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+            };
+            $all('[data-srev]').forEach(function(btn){
+              btn.onclick = function(){
+                api('users.revoke_sessions', { user_id: user.id, session_id: btn.getAttribute('data-srev'), reason: 'admin_revoke' })
+                  .then(function(){ toast('نشست بسته شد', 'success'); close(); loadRoute('users'); })
+                  .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+              };
+            });
+          });
+      }).catch(function(e){ toast(e.message || 'خطا', 'error'); });
+      return;
+    }
+    if (action === 'activity') {
+      api('users.activity', { user_id: user.id, limit: 50 }).then(function(data){
+        var items = (data && data.rows) || [];
+        var rowsHtml = items.map(function(ev){
+          return '<tr><td class="ltr-num">' + esc(ev.occurred_at || '') + '</td><td>' + esc(ev.action) + '</td>' +
+            '<td>' + (ev.result === 'ok' ? '<span class="badge ok">موفق</span>' : '<span class="badge error">ناموفق</span>') + '</td>' +
+            '<td class="ltr-num">' + esc(ev.ip_address || '-') + '</td></tr>';
+        }).join('');
+        showModal('<h3>فعالیت‌های ' + esc(user.username) + '</h3>' +
+          '<div class="table-wrap"><table><thead><tr><th>زمان</th><th>رویداد</th><th>نتیجه</th><th>IP</th></tr></thead><tbody>' +
+          (rowsHtml || '<tr><td colspan="4" class="muted">رویدادی ثبت نشده است.</td></tr>') + '</tbody></table></div>' +
+          '<div class="row" style="margin-top:10px"><button class="btn secondary" id="aClose">بستن</button></div>',
+          function(close){ $('#aClose').onclick = close; });
+      }).catch(function(e){ toast(e.message || 'خطا', 'error'); });
+    }
+  }
+
+  function permChecks(catalog, selected){
+    var modules = (catalog && catalog.modules) || [];
+    return modules.map(function(m){
+      return '<div style="margin-bottom:10px"><div class="muted small" style="font-weight:700">' + esc(m.module) + '</div>' +
+        m.permissions.map(function(p){
+          var on = (selected || []).indexOf(p.code) >= 0;
+          var allowed = hasPerm(p.code);
+          return '<label style="display:flex;gap:8px;align-items:center;padding:2px 0;' + (allowed ? '' : 'opacity:.55') + '">' +
+            '<input type="checkbox" data-perm="' + esc(p.code) + '"' + (on ? ' checked' : '') + (allowed ? '' : ' disabled') + '>' +
+            '<span>' + esc(p.description) + ' <span class="muted small">(' + esc(p.code) + ')</span></span></label>';
+        }).join('') + '</div>';
+    }).join('');
+  }
+
+  function selectedPermCodes(){
+    return $all('[data-perm]:checked').map(function(input){ return input.getAttribute('data-perm'); });
+  }
+
+  function viewRoles(){
+    return Promise.all([api('roles.list', {}), api('permissions.list', {})]).then(function(res){
+      var roles = (res[0] && res[0].roles) || [];
+      var catalog = res[1] || {};
+      var canManage = hasPerm('rbac.manage');
+      var body = roles.map(function(role){
+        return '<tr><td><code>' + esc(role.code) + '</code></td><td>' + esc(role.name) + '</td>' +
+          '<td>' + fmtNum((role.permissions || []).length) + '</td><td>' + fmtNum(role.users_count || 0) + '</td>' +
+          '<td>' + (role.is_active ? '<span class="badge ok">فعال</span>' : '<span class="badge">غیرفعال</span>') +
+          (role.is_system ? ' <span class="badge gold">سیستمی</span>' : '') + '</td>' +
+          '<td>' + (canManage && !role.is_system
+            ? '<div class="row" style="gap:6px"><button class="btn secondary sm" data-ract="edit" data-rcode="' + esc(role.code) + '">ویرایش</button>' +
+              '<button class="btn secondary sm" data-ract="perms" data-rcode="' + esc(role.code) + '">مجوزها</button></div>'
+            : '<span class="muted small">—</span>') + '</td></tr>';
+      }).join('');
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>نقش‌ها و مجوزها</h2><div class="toolbar">' +
+        (canManage ? '<button class="btn gold sm" id="addRole">نقش جدید</button>' : '') +
+        '<span class="muted small">' + fmtNum(roles.length) + ' نقش</span></div></div>' +
+        '<div class="alert info">مجوز مؤثر هر کاربر، اجتماع مجوزهای نقش‌های فعال اوست. اعطای مجوزی که خودتان ندارید مجاز نیست.</div>' +
+        '<div class="table-wrap"><table><thead><tr><th>کد</th><th>نام</th><th>مجوزها</th><th>کاربران</th><th>وضعیت</th><th>عملیات</th></tr></thead><tbody>' +
+        (body || '<tr><td colspan="6" class="muted">نقشی تعریف نشده است.</td></tr>') + '</tbody></table></div></div>';
+      if (!canManage) return;
+      $('#addRole').onclick = function(){ openRoleCreate(catalog); };
+      $all('[data-ract]').forEach(function(btn){
+        btn.onclick = function(){
+          var code = btn.getAttribute('data-rcode');
+          var role = roles.filter(function(r){ return r.code === code; })[0];
+          if (!role) return;
+          if (btn.getAttribute('data-ract') === 'edit') openRoleEdit(role);
+          else openRolePermissions(role, catalog);
+        };
+      });
+    });
+  }
+
+
+  function openRoleCreate(catalog){
+    showModal('<h3>نقش جدید</h3>' +
+      '<div class="form-grid">' +
+        '<div class="form-group"><label>کد نقش (انگلیسی، تغییرناپذیر)</label><input id="nrCode" dir="ltr" placeholder="reception"></div>' +
+        '<div class="form-group"><label>نام نمایشی</label><input id="nrName" placeholder="پذیرش"></div>' +
+        '<div class="form-group"><label>نقش نمایشی منو</label><select id="nrLegacy">' +
+          '<option value="operator" selected>اپراتور</option><option value="admin">مدیر</option><option value="doctor">پزشک</option>' +
+        '</select></div>' +
+      '</div>' +
+      '<div class="form-group"><label>توضیح</label><input id="nrDesc"></div>' +
+      '<div class="form-group"><label>مجوزها (فقط مجوزهای قابل اعطا فعال است)</label>' +
+        '<div style="max-height:260px;overflow:auto;border:1px solid var(--line,#ddd);border-radius:8px;padding:8px">' +
+        permChecks(catalog, []) + '</div></div>' +
+      '<div class="row"><button class="btn gold" id="nrSave">ذخیره</button><button class="btn secondary" id="nrCancel">انصراف</button></div>',
+      function(close){
+        $('#nrCancel').onclick = close;
+        $('#nrSave').onclick = function(){
+          api('roles.create', {
+            code: ($('#nrCode').value || '').trim().toLowerCase(),
+            name: ($('#nrName').value || '').trim(),
+            description: ($('#nrDesc').value || '').trim(),
+            legacy_role: $('#nrLegacy').value,
+            permissions: selectedPermCodes()
+          }).then(function(){ toast('نقش ایجاد شد', 'success'); close(); loadRoute('roles'); })
+            .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+        };
+      });
+  }
+
+  function openRoleEdit(role){
+    showModal('<h3>ویرایش نقش ' + esc(role.code) + '</h3>' +
+      '<div class="form-grid">' +
+        '<div class="form-group"><label>نام نمایشی</label><input id="erName" value="' + esc(role.name) + '"></div>' +
+        '<div class="form-group"><label>نقش نمایشی منو</label><select id="erLegacy">' +
+          ['admin', 'operator', 'doctor'].map(function(code){
+            return '<option value="' + code + '"' + (role.legacy_role === code ? ' selected' : '') + '>' + esc(roleLabel(code)) + '</option>';
+          }).join('') + '</select></div>' +
+      '</div>' +
+      '<div class="form-group"><label>توضیح</label><input id="erDesc" value="' + esc(role.description || '') + '"></div>' +
+      '<div class="form-group"><label class="switch"><input type="checkbox" id="erActive"' + (role.is_active ? ' checked' : '') + '><span class="switch-label">فعال</span></label></div>' +
+      '<div class="row"><button class="btn gold" id="erSave">ذخیره</button><button class="btn secondary" id="erCancel">انصراف</button></div>',
+      function(close){
+        $('#erCancel').onclick = close;
+        $('#erSave').onclick = function(){
+          api('roles.update', {
+            code: role.code,
+            name: $('#erName').value,
+            description: $('#erDesc').value,
+            is_active: $('#erActive').checked,
+            legacy_role: $('#erLegacy').value
+          }).then(function(){ toast('نقش به‌روزرسانی شد', 'success'); close(); loadRoute('roles'); })
+            .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+        };
+      });
+  }
+
+  function openRolePermissions(role, catalog){
+    showModal('<h3>مجوزهای نقش ' + esc(role.name) + '</h3>' +
+      '<div class="alert info">مجوزهای خاکستری، مجوزهایی هستند که شما خودتان ندارید و نمی‌توانید اعطا کنید.</div>' +
+      '<div style="max-height:320px;overflow:auto;border:1px solid var(--line,#ddd);border-radius:8px;padding:8px">' +
+      permChecks(catalog, role.permissions || []) + '</div>' +
+      '<div class="row" style="margin-top:10px"><button class="btn gold" id="prSave">ذخیره</button>' +
+      '<button class="btn secondary" id="prCancel">انصراف</button></div>',
+      function(close){
+        $('#prCancel').onclick = close;
+        $('#prSave').onclick = function(){
+          var current = role.permissions || [];
+          var wanted = selectedPermCodes();
+          var toAdd = wanted.filter(function(c){ return current.indexOf(c) < 0; });
+          var toRemove = current.filter(function(c){ return wanted.indexOf(c) < 0; });
+          var chain = Promise.resolve();
+          if (toAdd.length) chain = chain.then(function(){ return api('permissions.assign', { role_code: role.code, permission_codes: toAdd }); });
+          if (toRemove.length) chain = chain.then(function(){ return api('permissions.revoke', { role_code: role.code, permission_codes: toRemove }); });
+          chain.then(function(){ toast('مجوزها به‌روزرسانی شد', 'success'); close(); loadRoute('roles'); })
+            .catch(function(e){ toast(e.message || 'خطا', 'error'); });
+        };
+      });
+  }
+
+  function viewAudit(){
+    var filters = state.auditFilter || { action: '', result: '', from: '', to: '' };
+    api('audit.list', {
+      action: filters.action || null,
+      result: filters.result || null,
+      from: filters.from || null,
+      to: filters.to || null,
+      limit: 100
+    }).then(function(data){
+      var rows = (data && data.rows) || [];
+      var body = rows.map(function(ev, idx){
+        return '<tr data-aidx="' + idx + '" style="cursor:pointer"><td class="ltr-num">' + esc(String(ev.occurred_at || '').replace('T', ' ').substring(0, 19)) + '</td>' +
+          '<td>' + esc(ev.actor_username || '-') + '</td><td><code>' + esc(ev.action) + '</code></td>' +
+          '<td>' + esc(ev.entity || '') + '</td>' +
+          '<td>' + (ev.result === 'ok' ? '<span class="badge ok">موفق</span>' : '<span class="badge error">ناموفق</span>') + '</td>' +
+          '<td class="ltr-num">' + esc(ev.ip_address || '-') + '</td></tr>';
+      }).join('');
+      $('#content').innerHTML = '<div class="panel"><div class="panel-header"><h2>گزارش رویدادها</h2>' +
+        '<div class="toolbar"><span class="muted small">' + fmtNum((data && data.total) || 0) + ' رویداد</span></div></div>' +
+        '<div class="alert info">این گزارش فقط-افزودنی است؛ از طریق برنامه قابل ویرایش یا حذف نیست و اطلاعات حساس در آن ثبت نمی‌شود.</div>' +
+        '<div class="form-grid">' +
+          '<div class="form-group"><label>رویداد</label><input id="afAction" dir="ltr" value="' + esc(filters.action) + '" placeholder="auth.login_failed"></div>' +
+          '<div class="form-group"><label>نتیجه</label><select id="afResult">' +
+            '<option value=""' + (filters.result === '' ? ' selected' : '') + '>همه</option>' +
+            '<option value="ok"' + (filters.result === 'ok' ? ' selected' : '') + '>موفق</option>' +
+            '<option value="fail"' + (filters.result === 'fail' ? ' selected' : '') + '>ناموفق</option>' +
+          '</select></div>' +
+          '<div class="form-group"><label>از تاریخ (ISO)</label><input id="afFrom" dir="ltr" value="' + esc(filters.from) + '" placeholder="2026-11-01"></div>' +
+          '<div class="form-group"><label>تا تاریخ (ISO)</label><input id="afTo" dir="ltr" value="' + esc(filters.to) + '" placeholder="2026-11-30"></div>' +
+        '</div>' +
+        '<div class="row"><button class="btn gold sm" id="afApply">اعمال فیلتر</button>' +
+        '<button class="btn secondary sm" id="afReset">پاک‌کردن</button></div>' +
+        '<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>زمان</th><th>کاربر</th><th>رویداد</th><th>موجودیت</th><th>نتیجه</th><th>IP</th></tr></thead><tbody>' +
+        (body || '<tr><td colspan="6" class="muted">رویدادی یافت نشد.</td></tr>') + '</tbody></table></div></div>';
+      $('#afApply').onclick = function(){
+        state.auditFilter = {
+          action: ($('#afAction').value || '').trim(),
+          result: $('#afResult').value,
+          from: ($('#afFrom').value || '').trim(),
+          to: ($('#afTo').value || '').trim()
+        };
+        loadRoute('audit');
+      };
+      $('#afReset').onclick = function(){ state.auditFilter = null; loadRoute('audit'); };
+      $all('[data-aidx]').forEach(function(tr){
+        tr.onclick = function(){
+          var ev = rows[Number(tr.getAttribute('data-aidx'))];
+          if (!ev) return;
+          var detailsText = JSON.stringify(ev.details || {}, null, 2);
+          showModal('<h3>رویداد ' + esc(ev.action) + '</h3>' +
+            '<div class="muted small">شناسه: <span class="ltr-num">' + esc(ev.id) + '</span></div>' +
+            '<div class="form-grid" style="margin-top:8px">' +
+              '<div class="form-group"><label>زمان</label><input readonly value="' + esc(ev.occurred_at || '') + '"></div>' +
+              '<div class="form-group"><label>کاربر عامل</label><input readonly value="' + esc(ev.actor_username || '-') + '"></div>' +
+              '<div class="form-group"><label>موجودیت</label><input readonly value="' + esc((ev.entity || '') + ' / ' + (ev.entity_id || '')) + '"></div>' +
+              '<div class="form-group"><label>Correlation</label><input readonly value="' + esc(ev.request_id || '-') + '"></div>' +
+            '</div>' +
+            '<div class="form-group"><label>جزئیات (غیرحساس)</label><pre dir="ltr" style="white-space:pre-wrap;max-height:220px;overflow:auto;font-size:12px">' + esc(detailsText) + '</pre></div>' +
+            '<div class="row"><button class="btn secondary" id="adClose">بستن</button></div>',
+            function(close){ $('#adClose').onclick = close; });
+        };
+      });
+    });
+  }
+
   function boot(){
     api('system.ping', {}).then(function(r){
-      if (r && r.app) applyVersion(r.app.VERSION);
+      if (r && r.app) applyVersion(r.app.version || r.app.VERSION);
     }).catch(function(){}).then(function(){
       if(state.token){
         api('auth.me',{}).then(function(d){ state.user = d.user; render(); }).catch(function(){ setToken(''); state.user=null; render(); });

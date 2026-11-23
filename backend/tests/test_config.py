@@ -19,13 +19,14 @@ def make(**overrides) -> Settings:
 def test_development_defaults() -> None:
     settings = make()
     assert settings.app_name == "White Rose Clinic"
-    assert settings.app_version == "0.5.0"
+    assert settings.app_version == "0.6.0"
     assert settings.app_env == "development"
     assert settings.is_sqlite is True
     assert settings.timezone == "Asia/Tehran"
     assert settings.tzinfo.key == "Asia/Tehran"
     assert settings.api_port == 8000
-    assert settings.session_ttl == 8 * 60 * 60
+    assert settings.session_ttl == 12 * 60 * 60
+    assert settings.session_idle_seconds == 30 * 60
 
 
 def test_timezone_is_configurable() -> None:

@@ -13,6 +13,8 @@ from app.core.config import Settings
 
 REQUEST_ID_HEADER: Final = "X-Request-Id"
 _request_id: ContextVar[str] = ContextVar("wrc_request_id", default="")
+_client_ip: ContextVar[str] = ContextVar("wrc_client_ip", default="")
+_user_agent: ContextVar[str] = ContextVar("wrc_user_agent", default="")
 
 _STANDARD_LOG_KEYS: Final = {
     "name",
@@ -47,6 +49,19 @@ def set_request_id(value: str) -> None:
 
 def get_request_id() -> str:
     return _request_id.get()
+
+
+def set_client_identity(ip_address: str | None, user_agent: str | None) -> None:
+    _client_ip.set(ip_address or "")
+    _user_agent.set((user_agent or "")[:255])
+
+
+def get_client_ip() -> str | None:
+    return _client_ip.get() or None
+
+
+def get_user_agent() -> str | None:
+    return _user_agent.get() or None
 
 
 class JsonLogFormatter(logging.Formatter):

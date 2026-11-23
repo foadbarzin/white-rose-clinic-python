@@ -18,7 +18,7 @@ def test_healthz_contract(client) -> None:
     assert set(body) == {"status", "application", "version", "environment"}
     assert body["status"] == "ok"
     assert body["application"] == "White Rose Clinic"
-    assert body["version"] == "0.5.0"
+    assert body["version"] == "0.6.0"
     assert body["environment"] == "test"
 
 
@@ -48,14 +48,14 @@ def test_version_metadata(client) -> None:
     body = client.get("/api/meta/version").json()
     assert body["api_contract"] == "action-v1"
     assert body["timezone"] == "Asia/Tehran"
-    assert body["version"] == "0.5.0"
+    assert body["version"] == "0.6.0"
 
 
 def test_desktop_info_contract(client) -> None:
     body = client.get("/desktop/info").json()
     assert body["desktop"] is False
     assert body["mode"] == "server"
-    assert body["version"] == "0.5.0"
+    assert body["version"] == "0.6.0"
 
 
 def test_openapi_is_not_leaking( client) -> None:

@@ -320,5 +320,44 @@ Content-Type: application/json
 
 **قاعدهٔ حاکم:** «قرارداد کامل، پیاده‌سازی تدریجی». افزودن هر اکشن فقط با ثبت در این سند، تست قرارداد و مجوز مجاز است.
 
+---
+
+## ۱۲) اکشن‌های فاز ۳ (۰.۶.۰) — پیاده‌شده
+
+> این بخش جایگزین «وضعیت پیاده‌سازی (فاز ۲)» است. اکشن‌های زیر اکنون واقعی هستند؛ بقیه پس از احراز هویت `ACTION_NOT_IMPLEMENTED` می‌دهند.
+
+| اکشن | payload | مجوز | Audit |
+|---|---|---|---|
+| `auth.login` | `{username, password, deviceInfo?}` | عمومی (نرخ‌محدود) | `auth.login_success`, `auth.login_failed`, `auth.login_blocked`, `auth.login_rate_limited` |
+| `auth.me` | `{}` | نشست معتبر | — |
+| `auth.sessions` | `{}` | نشست معتبر | — |
+| `auth.logout` | `{}` | نشست معتبر | `auth.logout` |
+| `auth.logout_all` | `{}` | نشست معتبر | `auth.logout_all` |
+| `auth.change_password` | `{oldPassword, newPassword}` | نشست معتبر | `auth.password_changed`, `auth.password_change_failed` |
+| `users.list` | `{q?, include_inactive?}` | `users.manage` | — |
+| `users.get` | `{user_id}` | `users.manage` | — |
+| `users.create` | `{username, password, display_name?, role_codes[], linked_doctor_id?, linked_operator_id?, must_change_password?}` | `users.manage` (+ ضد ارتقا) | `user.created` |
+| `users.update` | `{user_id, display_name?, linked_doctor_id?, linked_operator_id?, must_change_password?}` | `users.manage` | `user.updated` (before/after) |
+| `users.disable` / `users.enable` | `{user_id}` | `users.manage` | `user.disabled` / `user.enabled` |
+| `users.unlock` | `{user_id}` | `users.manage` | `account.unlocked` |
+| `users.change_password` | `{user_id, new_password}` | `users.manage` | `user.password_reset` |
+| `users.sessions` | `{user_id}` | `users.manage` | — |
+| `users.revoke_sessions` | `{user_id, session_id?, reason?}` | `users.manage` | `auth.session_revoked` |
+| `users.activity` | `{user_id, limit?, offset?}` | `users.manage` | — |
+| `roles.list` | `{}` | `rbac.manage` | — |
+| `roles.create` | `{code, name, description?, permissions[], legacy_role?}` | `rbac.manage` (+ ضد ارتقا) | `role.created` |
+| `roles.update` | `{code, name?, description?, is_active?, legacy_role?}` | `rbac.manage` | `role.updated` |
+| `roles.assign` / `roles.revoke` | `{user_id, role_codes[]}` | `rbac.manage` | `role.assigned` / `role.revoked` |
+| `permissions.list` | `{}` | `rbac.manage` | — |
+| `permissions.assign` / `permissions.revoke` | `{role_code, permission_codes[]}` | `rbac.manage` | `permission.assigned` / `permission.revoked` |
+| `audit.list` | `{action?, entity?, entity_id?, actor_user_id?, result?, from?, to?, limit?, offset?}` | `audit.read` | — |
+| `audit.get` | `{id}` | `audit.read` | — |
+
+**قواعد خطا (فاز ۳):** `AUTH_FAILED` (پیام یکسان)، `AUTH_LOCKED` (با دقیقهٔ باقی‌مانده)، `RATE_LIMITED`، `PASSWORD_CHANGE_REQUIRED`، `FORBIDDEN` (مجوز/ضد ارتقا/تغییر نقش خود)، `DUPLICATE` (نام کاربری/کد نقش)، `VALIDATION` (بدون بازتاب مقادیر حساس).
+
+**همچنان خارج از دامنه:** `invoices.*`, `payments.*`, `credits.*`, `reports.*`, `settings.*`, `system.*`, `sync.*` → `ACTION_NOT_IMPLEMENTED`.
+
+**تغییرات سازگاری UI:** پاسخ `auth.login` علاوه بر `token/user/mustChangePassword`، فیلدهای `session`، `user.permissions` و `user.roles` را هم دارد؛ `role` (پروjection قدیمی) حفظ شده تا منوی فعلی بدون تغییر کار کند.
+
 
 

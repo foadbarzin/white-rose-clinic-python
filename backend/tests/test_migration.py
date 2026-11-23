@@ -35,7 +35,7 @@ def test_upgrade_head_creates_all_tables(db_path: Path) -> None:
     tables = _tables(db_path)
     assert "alembic_version" in tables
     assert set(Base.metadata.tables).issubset(tables)
-    assert len(Base.metadata.tables) == 28
+    assert len(Base.metadata.tables) == 31
 
 
 def test_alembic_version_is_recorded(db_path: Path) -> None:

@@ -51,7 +51,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "White Rose Clinic"
-    app_version: str = "0.5.0"
+    app_version: str = "0.6.0"
     app_env: AppEnv = "development"
     debug: bool = False
 
@@ -69,7 +69,25 @@ class Settings(BaseSettings):
         default="CHANGE_ME_generate_a_random_48_char_secret_key_before_use",
         description="Server-side secret (>= 32 chars). Never commit a real value.",
     )
-    session_ttl: int = Field(default=8 * 60 * 60, ge=300, le=7 * 24 * 60 * 60)
+    # manager decision (phase 3): 12h absolute lifetime, 30m idle timeout
+    session_ttl: int = Field(default=12 * 60 * 60, ge=300, le=7 * 24 * 60 * 60)
+    session_idle_seconds: int = Field(default=30 * 60, ge=60, le=24 * 60 * 60)
+    session_max_concurrent: int = Field(default=3, ge=1, le=20)
+    login_max_attempts: int = Field(default=5, ge=3, le=20)
+    login_lock_minutes: int = Field(default=15, ge=1, le=1440)
+    login_rate_limit_per_minute: int = Field(default=10, ge=3, le=200)
+    # Argon2id parameters (tests use lower values for speed; production defaults stay strong)
+    argon2_memory_kib: int = Field(default=65_536, ge=8_192, le=1_048_576)
+    argon2_time_cost: int = Field(default=3, ge=1, le=20)
+    argon2_parallelism: int = Field(default=4, ge=1, le=16)
+    # explicit CORS policy: empty list = same-origin only (recommended)
+    cors_allow_origins: list[str] = Field(default_factory=list)
+
+    # --- bootstrap (CLI only; never exposed through the public API) ----------
+    bootstrap_key: str | None = Field(
+        default=None,
+        description="Optional extra guard for the CLI bootstrap (>= 16 chars).",
+    )
 
     # --- locale --------------------------------------------------------------
     timezone: str = "Asia/Tehran"
@@ -126,6 +144,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_hardening(self) -> "Settings":
+        if self.session_idle_seconds >= self.session_ttl:
+            raise ValueError("SESSION_IDLE_SECONDS must be smaller than SESSION_TTL")
+        for origin in self.cors_allow_origins:
+            if not origin.startswith(("http://", "https://")):
+                raise ValueError(f"invalid CORS origin: {origin!r}")
         if self.app_env == "production":
             if self.debug:
                 raise ValueError("DEBUG must be false in production")

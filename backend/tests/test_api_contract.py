@@ -14,7 +14,7 @@ def test_ping_contract(client) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"]["app"]["version"] == "0.5.0"
+    assert body["data"]["app"]["version"] == "0.6.0"
     assert body["data"]["app"]["timezone"] == "Asia/Tehran"
     assert response.headers.get("X-Request-Id")
 
@@ -35,29 +35,21 @@ def test_unknown_action_returns_not_found(client) -> None:
     assert body["error"]["code"] == "NOT_FOUND"
 
 
-def test_protected_action_requires_session(client) -> None:
+def test_protected_action_requires_session(migrated_client) -> None:
     for action in ("users.list", "customers.list", "invoices.issue"):
-        body = post(client, action).json()
+        body = post(migrated_client, action).json()
         assert body["ok"] is False, action
         assert body["error"]["code"] == "UNAUTHORIZED", action
         assert body["request_id"]
 
 
-def test_unimplemented_action_with_session(client, monkeypatch) -> None:
-    from app.api import router as api_router
-    from app.core.permissions import ADMIN, Principal
-
-    principal = Principal(user_id="00000000-0000-7000-8000-000000000001", username="admin", role=ADMIN)
-    monkeypatch.setattr(api_router, "resolve_session", lambda token: principal)
-    body = post(client, "customers.list", token="opaque-token").json()
+def test_login_with_unknown_user_is_uniform(migrated_client) -> None:
+    body = post(
+        migrated_client, "auth.login", {"username": "nobody", "password": "whatever"}
+    ).json()
     assert body["ok"] is False
-    assert body["error"]["code"] == "ACTION_NOT_IMPLEMENTED"
-
-
-def test_login_is_documented_but_not_implemented(client) -> None:
-    body = post(client, "auth.login", {"username": "admin", "password": "secret"}).json()
-    assert body["ok"] is False
-    assert body["error"]["code"] == "ACTION_NOT_IMPLEMENTED"
+    assert body["error"]["code"] == "AUTH_FAILED"
+    assert "نام کاربری یا رمز عبور" in body["error"]["message"]
 
 
 def test_invalid_body_is_rejected_with_envelope(client) -> None:
@@ -103,7 +95,7 @@ def test_contract_metadata(client) -> None:
 
 
 @pytest.mark.parametrize("action", ["invoices.issue", "payments.add", "reports.summary"])
-def test_financial_actions_are_not_executed(client, action: str) -> None:
-    body = post(client, action).json()
+def test_financial_actions_are_not_executed(migrated_client, action: str) -> None:
+    body = post(migrated_client, action).json()
     assert body["ok"] is False
     assert body["error"]["code"] == "UNAUTHORIZED"

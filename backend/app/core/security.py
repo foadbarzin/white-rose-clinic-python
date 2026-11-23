@@ -89,14 +89,24 @@ def _combine(password: str, pepper: str) -> str:
     return f"{password}:{pepper}"
 
 
-def hash_password(password: str, *, pepper: str = "") -> PasswordHash:
+def hash_password(
+    password: str,
+    *,
+    pepper: str = "",
+    memory_kib: int | None = None,
+    time_cost: int | None = None,
+    parallelism: int | None = None,
+) -> PasswordHash:
     """Hash a password with Argon2id (preferred) or PBKDF2-SHA256 fallback."""
     material = _combine(password or "", pepper)
     if _ARGON2_AVAILABLE:
+        mem = int(memory_kib or ARGON2_MEMORY_KIB)
+        rounds = int(time_cost or ARGON2_TIME_COST)
+        lanes = int(parallelism or ARGON2_PARALLELISM)
         hasher = _Argon2PasswordHasher(
-            time_cost=ARGON2_TIME_COST,
-            memory_cost=ARGON2_MEMORY_KIB,
-            parallelism=ARGON2_PARALLELISM,
+            time_cost=rounds,
+            memory_cost=mem,
+            parallelism=lanes,
             hash_len=32,
             salt_len=16,
         )
@@ -104,11 +114,7 @@ def hash_password(password: str, *, pepper: str = "") -> PasswordHash:
         return PasswordHash(
             algo="argon2id",
             encoded=encoded,
-            params={
-                "time_cost": ARGON2_TIME_COST,
-                "memory_cost": ARGON2_MEMORY_KIB,
-                "parallelism": ARGON2_PARALLELISM,
-            },
+            params={"time_cost": rounds, "memory_cost": mem, "parallelism": lanes},
         )
 
     salt = secrets.token_bytes(PBKDF2_SALT_BYTES)
@@ -180,13 +186,17 @@ def validate_password_strength(password: str, *, username: str | None = None) ->
 # ------------------------------------------------------------------- session policy
 @dataclass(frozen=True)
 class SessionPolicy:
-    absolute_ttl_seconds: int = 8 * 60 * 60
-    idle_timeout_seconds: int = 60 * 60
+    absolute_ttl_seconds: int = 12 * 60 * 60
+    idle_timeout_seconds: int = 30 * 60
     max_concurrent: int = 3
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "SessionPolicy":
-        return cls(absolute_ttl_seconds=settings.session_ttl)
+        return cls(
+            absolute_ttl_seconds=settings.session_ttl,
+            idle_timeout_seconds=settings.session_idle_seconds,
+            max_concurrent=settings.session_max_concurrent,
+        )
 
     def expires_at(self, issued_at: datetime) -> datetime:
         return issued_at + timedelta(seconds=self.absolute_ttl_seconds)

@@ -16,6 +16,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
+from app.core.config import get_settings
+
 FRONTEND_DIR = Path(__file__).resolve().parents[3] / "frontend"
 
 _JSON_INCLUDE = re.compile(
@@ -58,13 +60,18 @@ def _include(name: str) -> str:
 
 def render_index() -> str:
     """Resolve Apps Script scriptlets and inject the apiCall shim."""
+    settings = get_settings()
     html = _read("Client_Index")
     html = _JSON_INCLUDE.sub(lambda m: json.dumps(_include(m.group(2)), ensure_ascii=False), html)
     html = _INCLUDE.sub(lambda m: _include(m.group(2)), html)
+    version_script = (
+        f'<script>window.WRC_APP_VERSION = {json.dumps(settings.app_version)};'
+        f'window.WRC_APP_NAME = {json.dumps(settings.app_name)};</script>'
+    )
     if "<body>" in html:
-        html = html.replace("<body>", "<body>" + _DESKTOP_SHIM, 1)
+        html = html.replace("<body>", "<body>" + version_script + _DESKTOP_SHIM, 1)
     else:  # pragma: no cover - defensive
-        html = _DESKTOP_SHIM + html
+        html = version_script + _DESKTOP_SHIM + html
     return html
 
 

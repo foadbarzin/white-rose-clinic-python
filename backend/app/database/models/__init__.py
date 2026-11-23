@@ -19,6 +19,7 @@ from app.database.models.invoicing import (
     InvoiceNumberHistory,
     Payment,
 )
+from app.database.models.rbac import Role, RolePermission, UserRole
 from app.database.models.sync import ChangeFeed, SyncConflict, SyncOperation
 from app.database.models.system import (
     AuditLog,
@@ -51,11 +52,14 @@ __all__ = [
     "PatientCreditAccount",
     "PatientCreditTransaction",
     "Payment",
+    "Role",
+    "RolePermission",
     "Sequence",
     "Service",
     "Setting",
     "SyncConflict",
     "SyncOperation",
     "User",
+    "UserRole",
     "UserSession",
 ]

@@ -25,6 +25,7 @@ from app.core.logging import (
     REQUEST_ID_HEADER,
     configure_logging,
     get_request_id,
+    set_client_identity,
     set_request_id,
 )
 from app.database import models  # noqa: F401  (registers all table metadata)
@@ -122,6 +123,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         incoming = request.headers.get(REQUEST_ID_HEADER, "")
         request_id = (incoming.strip()[:64] if incoming else "") or uuid.uuid4().hex
         set_request_id(request_id)
+        set_client_identity(
+            request.client.host if request.client else None,
+            request.headers.get("user-agent"),
+        )
         response = await call_next(request)
         response.headers[REQUEST_ID_HEADER] = request_id
         for name, value in SECURITY_HEADERS.items():
@@ -130,6 +135,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return response
 
     _register_exception_handlers(app)
+
+    if settings.cors_allow_origins:
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_allow_origins),
+            allow_credentials=False,  # token in body/header, never cookies
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Content-Type", "Authorization", "X-Request-Id"],
+        )
 
     app.include_router(health.router)
     app.include_router(api_router)

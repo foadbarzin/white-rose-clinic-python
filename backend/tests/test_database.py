@@ -34,11 +34,14 @@ EXPECTED_TABLES = {
     "patient_credit_transactions",
     "patients",
     "payments",
+    "role_permissions",
+    "roles",
     "sequences",
     "services",
     "settings",
     "sync_conflicts",
     "sync_operations",
+    "user_roles",
     "user_sessions",
     "users",
 }
@@ -46,7 +49,7 @@ EXPECTED_TABLES = {
 
 def test_metadata_contains_all_domain_tables() -> None:
     assert set(Base.metadata.tables) == EXPECTED_TABLES
-    assert len(Base.metadata.tables) == 28
+    assert len(Base.metadata.tables) == 31
 
 
 def test_uuid7_is_time_ordered() -> None:

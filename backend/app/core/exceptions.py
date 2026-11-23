@@ -30,6 +30,7 @@ class ErrorCode:
     RATE_LIMITED: Final = "RATE_LIMITED"
     SYNC_REJECTED: Final = "SYNC_REJECTED"
     ACTION_NOT_IMPLEMENTED: Final = "ACTION_NOT_IMPLEMENTED"
+    PASSWORD_CHANGE_REQUIRED: Final = "PASSWORD_CHANGE_REQUIRED"
     NOT_READY: Final = "NOT_READY"
     INTERNAL: Final = "INTERNAL"
 
@@ -48,6 +49,7 @@ DEFAULT_MESSAGES: Final[dict[str, str]] = {
     ErrorCode.RATE_LIMITED: "تعداد درخواست‌ها بیش از حد مجاز است.",
     ErrorCode.SYNC_REJECTED: "عملیات همگام‌سازی پذیرفته نشد.",
     ErrorCode.ACTION_NOT_IMPLEMENTED: "این قابلیت در نسخهٔ فعلی موتور فعال نشده است.",
+    ErrorCode.PASSWORD_CHANGE_REQUIRED: "برای ادامه باید رمز عبور خود را تغییر دهید.",
     ErrorCode.NOT_READY: "سرویس آماده نیست.",
     ErrorCode.INTERNAL: "خطای داخلی سرور رخ داد.",
 }
@@ -115,6 +117,18 @@ class LockTimeout(WrcError):
 
 class RateLimited(WrcError):
     code = ErrorCode.RATE_LIMITED
+
+
+class AuthFailed(WrcError):
+    code = ErrorCode.AUTH_FAILED
+
+
+class AuthLocked(WrcError):
+    code = ErrorCode.AUTH_LOCKED
+
+
+class PasswordChangeRequired(WrcError):
+    code = ErrorCode.PASSWORD_CHANGE_REQUIRED
 
 
 class NotImplementedAction(WrcError):

@@ -204,4 +204,51 @@
 - عملیات بایگانی/حذف دائمی باید `reason` و `confirm` داشته باشند و در `audit_log` با `before/after` ثبت شوند (TDR-014/015).
 - حذف دائمی هرگز روی Audit اعمال نمی‌شود و برای رکوردهای دارای وابستگی مالی ممنوع است.
 
+---
+
+## ۱۴) پیاده‌سازی امنیتی فاز ۳ (نسخهٔ ۰.۶.۰)
+
+### ۱۴.۱ احراز هویت و نشست
+| کنترل | پیاده‌سازی |
+|---|---|
+| هش رمز | Argon2id (`m=65536KiB, t=3, p=4` در تولید؛ قابل تنظیم با `ARGON2_*`) + pepper از `SECRET_KEY` |
+| توکن نشست | `secrets.token_urlsafe(32)`؛ ذخیرهٔ فقط `SHA-256` در `user_sessions.token_hash` |
+| انقضا | بیکاری ۳۰ دقیقه (sliding با throttle ۶۰ ثانیه) · مطلق ۱۲ ساعت |
+| سقف نشست | حداکثر ۳ نشست فعال؛ چهارمی قدیمی‌ترین را ابطال می‌کند |
+| چرخهٔ توکن | توکن فقط در پاسخ `auth.login` یک‌بار ارائه می‌شود؛ Session Fixation ممکن نیست (توکن ورودی پذیرفته نمی‌شود) |
+| ابطال | خروج، خروج همه، تغییر/بازنشانی رمز، غیرفعال‌سازی، ابطال مدیر؛ استفادهٔ مجدد → `UNAUTHORIZED` + Audit |
+| پیام ورود | یکسان برای کاربر ناموجود و رمز اشتباه + محاسبهٔ هش ساختگی برای یکسان‌سازی زمان |
+| قفل و نرخ | ۵ تلاش/۱۵ دقیقه + Rate limit ۱۰ درخواست در دقیقه بر IP و نام کاربری |
+| اجباری بودن تغییر رمز | تا تغییر رمز، فقط `auth.me/change_password/logout/logout_all/sessions` مجاز است (`PASSWORD_CHANGE_REQUIRED`) |
+
+### ۱۴.۲ RBAC
+- کاتالوگ ۳۲ مجوز در کد (`app/core/permissions.py`) با ماژول و توضیح فارسی.
+- نقش‌ها در DB؛ `is_system` برای نقش `owner` که قابل ویرایش/کاهش مجوز نیست.
+- مجوز مؤثر = اجتماع مجوزهای نقش‌های **فعال** کاربر.
+- **ضد ارتقا:** واگذاری مجوز/نقش فقط اگر زیرمجموعهٔ مجوزهای عامل باشد؛ تغییر نقش حساب خود ممنوع.
+- محافظت از قفل‌شدن سیستم: غیرفعال‌سازی/حذف نقش آخرین دارندهٔ `rbac.manage` ممنوع.
+- فیلتر داده (پزشک/اپراتور) همچنان باید در SQL اعمال شود؛ فاز ۳ فقط زیرساخت را فراهم کرده است.
+
+### ۱۴.۳ Audit
+- ثبت اتمیک در همان تراکنش عملیات؛ برای رخدادهای رد شده (نشست منقضی/ابطال‌شده/نرخ) نیز ثبت انجام می‌شود.
+- زنجیرهٔ هش `hash_prev → hash_self` با زمان‌های یکنوای یکتا؛ `AuditService.verify_chain` برای بررسی دوره‌ای.
+- حذف/ویرایش API وجود ندارد؛ فقط `audit.list` و `audit.get` با مجوز `audit.read`.
+- ماسک‌کردن کلیدهای حساس (`password`, `token`, `secret`, `salt`, ...) به‌جز `must_change_password`.
+
+### ۱۴.۴ شواهد تست (۱۴۳ تست سبز)
+| سرفصل | نمونهٔ تست |
+|---|---|
+| هش رمز/توکن | `test_password_and_token_are_hashed`, `test_password_salts_are_unique` |
+| انقضا/ابطال | `test_idle_and_absolute_expiry`, `test_logout_and_token_reuse`, `test_admin_can_revoke_user_sessions` |
+| قفل و نرخ | `test_account_lockout_and_admin_unlock`, `test_login_rate_limit_per_ip` |
+| ضد ارتقا | `test_no_privilege_escalation`, `test_cannot_disable_or_edit_own_account`, `test_last_rbac_holder_cannot_be_disabled` |
+| Audit | `test_audit_never_contains_secrets`, `test_audit_hash_chain_detects_tampering`, `test_audit_is_read_only_through_api` |
+| Bootstrap | `test_fresh_database_has_no_accounts_or_roles`, `test_public_bootstrap_action_is_disabled` |
+| CORS/هدرها | `test_cors_default_is_same_origin_only`, `test_security_headers_present` |
+
+### ۱۴.۵ محدودیت‌ها
+- Rate limiter در حافظهٔ فرآیند است؛ برای چند نمونهٔ سرور باید به Redis منتقل شود (خارج از دامنه).
+- HTTPS/TLS و استقرار PostgreSQL همچنان باز (`O-06`).
+- Audit در SQLite/PostgreSQL قابل حذف توسط ادمین دیتابیس است؛ کنترل کامل نیازمند WORM خارجی در فاز استقرار است.
+
 

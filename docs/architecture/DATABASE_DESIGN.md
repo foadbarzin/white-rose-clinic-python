@@ -537,6 +537,50 @@ erDiagram
 **قاعدهٔ اتمی:** پرداخت نقدی/کارتی که از مانده بیشتر است → در یک تراکنش: `payments(amount=مانده)` + `patient_credit_transactions(overpayment, in, مازاد, idempotency_key='pay:<payment_id>')` + به‌روزرسانی `patients_credit_accounts.balance`.
 **قاعدهٔ استفادهٔ اعتبار:** `payments(method='credit', amount=X)` + `patient_credit_transactions(credit_applied, out, X, idempotency_key='credituse:<payment_id>')`.
 
+---
+
+## ۱۸) جداول RBAC و تغییرات فاز ۳ (نسخهٔ ۰.۶.۰ — مهاجرت `a4576410fc23`)
+
+### ۱۸.۱ `roles`
+
+| ستون | نوع | قید |
+|---|---|---|
+| `id` | uuid | PK (UUIDv7) |
+| `code` | varchar(64) | **UNIQUE**، `^[a-z][a-z0-9_]{1,63}$` |
+| `name` | varchar(120) | NOT NULL |
+| `description` | text | NULL |
+| `is_system` | boolean | DEFAULT false؛ نقش `owner` محافظت‌شده است |
+| `is_active` | boolean | DEFAULT true |
+| `legacy_role` | varchar(16) | `admin`/`operator`/`doctor` — فقط projection منوی فعلی |
+| + ستون‌های مشترک | | Audit/SoftDelete/Sync |
+
+**ایندکس:** `uq_roles_code`, `ix_roles_active`.
+
+### ۱۸.۲ `role_permissions`
+
+`role_id uuid FK→roles ON DELETE CASCADE` + `permission_code varchar(64)` به‌صورت **PK مرکب**؛ `assigned_by uuid`, `assigned_at timestamptz`.
+کد مجوز باید در کاتالوگ کد (`PERMISSION_CODES`) باشد؛ در غیر این صورت `VALIDATION`. ایندکس `ix_role_permissions_code`.
+
+### ۱۸.۳ `user_roles`
+
+`user_id uuid FK→users ON DELETE CASCADE` + `role_id uuid FK→roles ON DELETE CASCADE` (**PK مرکب**)، `assigned_by`, `assigned_at`.
+چند نقش برای یک کاربر مجاز است؛ مجوز مؤثر = اجتماع مجوزهای نقش‌های `is_active=true`.
+
+### ۱۸.۴ تغییرات جدول‌های موجود
+
+| جدول | ستون جدید | توضیح |
+|---|---|---|
+| `user_sessions` | `ip_address varchar(45)`, `user_agent varchar(255)` | ردیابی نشست/نمایش به کاربر |
+| `audit_log` | `ip_address varchar(45)`, `user_agent varchar(255)` | الزامات فاز ۳ |
+| `users` | بدون تغییر ساختاری | ستون `role` فقط projection نمایشی است؛ منبع مجوز `user_roles` است |
+
+### ۱۸.۵ قواعد یکپارچگی
+- `users.role` هم‌زمان با تخصیص/حذف نقش‌ها بازمحاسبه می‌شود (admin > operator > doctor) تا منوی فعلی سازگار بماند؛ **مبنای مجوز نیست**.
+- حذف فیزیکی `users` در API وجود ندارد (فقط غیرفعال‌سازی)، بنابراین FKها با `RESTRICT/CASCADE` امن هستند.
+- نقش سیستمی: ویرایش/غیرفعال‌سازی/تغییر مجوز ممنوع (سرویس + تست).
+- Audit همچنان فقط-افزودنی است؛ `roles`/`user_roles` تغییرات خود را در Audit ثبت می‌کنند.
+- مهاجرت فقط DDL است؛ هیچ نقش/کاربر/مجوز تخصیص‌یافته‌ای در migration ساخته نمی‌شود (Bootstrap امن جداگانه).
+
 
 
 

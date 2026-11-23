@@ -90,6 +90,8 @@ class AuditLog(UUIDPrimaryKeyMixin, Base):
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     context: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
     hash_prev: Mapped[str | None] = mapped_column(String(64), nullable=True)
     hash_self: Mapped[str | None] = mapped_column(String(64), nullable=True)
 

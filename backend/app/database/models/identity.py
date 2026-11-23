@@ -79,6 +79,8 @@ class UserSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     device_info: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
